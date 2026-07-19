@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
 type Mode = "primary" | "income";
-type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string };
+type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string };
 type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
 type Usage = { requests: number; limit: number; period: string };
 
@@ -15,6 +15,7 @@ export default function PropertiesPage() {
   const [sourceConnected, setSourceConnected] = useState(false);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [showSearch, setShowSearch] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -60,6 +61,15 @@ export default function PropertiesPage() {
         <button className={mode === "income" ? "active" : ""} onClick={() => setMode("income")}>Income properties</button>
       </nav>
 
+      <form className="property-ai-search" onSubmit={(event) => {
+        event.preventDefault();
+        const prompt = String(new FormData(event.currentTarget).get("prompt") ?? "").trim();
+        if (prompt) window.location.assign(`/assistant?prompt=${encodeURIComponent(`Property Finder request: ${prompt}. Search current information and help me evaluate the result as a ${mode === "income" ? "real-estate investment" : "primary residence"}.`)}`);
+      }}>
+        <input name="prompt" placeholder="Ask about a specific home, address, city, ZIP code, or area..." required />
+        <button type="submit">Ask AI</button>
+      </form>
+
       {showSearch && (
         <form className="property-search-form" onSubmit={addSearch}>
           <input type="hidden" name="mode" value={mode} />
@@ -75,18 +85,19 @@ export default function PropertiesPage() {
 
       <section className="property-toolbar">
         <div>{activeSearches.map((search) => <span key={search.id}>{search.label}</span>)}</div>
-        <small>{sourceConnected ? `Listing feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>
+        <div className="property-feed-state"><small>{sourceConnected ? `Weekly feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>{sourceConnected && <button disabled={syncing} onClick={async () => { setSyncing(true); setError(""); const response = await fetch("/api/properties/sync", { method: "POST" }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "Unable to start the scan."); window.setTimeout(() => { setSyncing(false); load().catch(() => undefined); }, 5000); }}>{syncing ? "Scanning…" : "Scan now"}</button>}</div>
       </section>
       {error && <p className="property-error" role="alert">{error}</p>}
       {listings.length ? (
         <section className="property-grid">
           {listings.map((listing) => (
             <article className="property-card" key={`${listing.source_id}-${listing.search_label}`}>
-              <div className="property-card-top"><span>{listing.search_label}</span><small>{listing.days_on_market ?? "—"} days</small></div>
+              <div className="property-card-top"><span>{listing.search_label}</span><small>{listing.ai_score ? `AI ${listing.ai_score}/100` : `${listing.days_on_market ?? "—"} days`}</small></div>
               <h2>{listing.address}</h2>
               <p>{[listing.city, listing.state, listing.zip_code].filter(Boolean).join(", ")}</p>
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
+              {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>
           ))}

@@ -65,7 +65,9 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS list_items (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('project', 'grocery')), visibility TEXT NOT NULL DEFAULT 'shared' CHECK(visibility IN ('private', 'shared')), text TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, completed_at INTEGER)"),
     db.prepare("CREATE INDEX IF NOT EXISTS list_items_owner_kind_idx ON list_items (owner, kind, completed, created_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS api_usage (service TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (service, period))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_ai_rankings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, score INTEGER NOT NULL, summary TEXT NOT NULL, ranked_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
   ]);
+  await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
 }
 
 function json(body: Record<string, unknown>, status = 200, headers?: HeadersInit) {
@@ -221,7 +223,7 @@ async function simplifyList(request: Request, env: Env, username: string) {
 
 async function propertySearches(request: Request, env: Env, username: string) {
   if (request.method === "GET") {
-    const result = await env.DB.prepare("SELECT id, mode, label, city, state, zip_code, min_price, max_price, active, created_at FROM property_searches WHERE owner = ? ORDER BY created_at DESC").bind(username).all();
+    const result = await env.DB.prepare("SELECT id, mode, label, city, state, zip_code, min_price, max_price, active, created_at FROM property_searches WHERE owner = ? OR owner = 'shared' ORDER BY created_at DESC").bind(username).all();
     return json({ searches: result.results ?? [] });
   }
   const body = await request.json<{ mode?: string; label?: string; city?: string; state?: string; zipCode?: string; minPrice?: number; maxPrice?: number }>();
@@ -238,8 +240,9 @@ async function propertySearches(request: Request, env: Env, username: string) {
 
 async function propertyListings(request: Request, env: Env, username: string) {
   const mode = new URL(request.url).searchParams.get("mode") === "income" ? "income" : "primary";
-  const result = await env.DB.prepare(`SELECT l.source_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label
-    FROM property_listings l JOIN property_searches s ON s.id = l.search_id WHERE s.owner = ? AND l.mode = ? ORDER BY l.last_seen_at DESC, l.price ASC LIMIT 250`).bind(username, mode).all();
+  const result = await env.DB.prepare(`SELECT l.source_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary
+    FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id
+    WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
   return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
@@ -253,6 +256,38 @@ async function reserveRentCastRequest(db: D1Database) {
   return Number(reservation.meta.changes ?? 0) === 1;
 }
 
+async function rankNorthwestArkansas(env: Env) {
+  if (!env.OPENAI_API_KEY) return;
+  const result = await env.DB.prepare("SELECT source_id, address, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = -100 AND status = 'Active' AND price <= 600000 ORDER BY last_seen_at DESC LIMIT 120").all<Record<string, unknown>>();
+  const candidates = result.results ?? [];
+  if (!candidates.length) return;
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-5.6-terra",
+      instructions: "Rank Northwest Arkansas multifamily investment listings. Favor price efficiency, usable unit count signals, reasonable size, and value indicated by days on market. Do not invent rent, expenses, condition, or cap rate. Return only valid JSON as an array with up to 50 objects: source_id (string), score (integer 0-100), summary (one short factual sentence explaining the score and uncertainty).",
+      input: JSON.stringify(candidates),
+    }),
+  });
+  if (!response.ok) {
+    console.error("Property AI ranking failed", response.status);
+    return;
+  }
+  const payload = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  try {
+    const cleaned = responseText(payload).replace(/^```json\s*/i, "").replace(/```\s*$/, "");
+    const rankings = JSON.parse(cleaned) as Array<{ source_id?: string; score?: number; summary?: string }>;
+    const valid = rankings.filter((item) => item.source_id && Number.isFinite(item.score)).slice(0, 50);
+    if (!valid.length) return;
+    const now = Date.now();
+    await env.DB.batch(valid.map((item) => env.DB.prepare("INSERT INTO property_ai_rankings (source_id, search_id, score, summary, ranked_at) VALUES (?, -100, ?, ?, ?) ON CONFLICT(source_id, search_id) DO UPDATE SET score=excluded.score, summary=excluded.summary, ranked_at=excluded.ranked_at")
+      .bind(item.source_id, Math.max(0, Math.min(100, Math.round(item.score ?? 0))), String(item.summary ?? "AI-ranked candidate.").slice(0, 400), now)));
+  } catch (error) {
+    console.error("Property AI ranking response was invalid", error);
+  }
+}
+
 async function syncPropertyListings(env: Env) {
   if (!env.RENTCAST_API_KEY) return;
   await ensureSchema(env.DB);
@@ -263,14 +298,18 @@ async function syncPropertyListings(env: Env) {
       console.log("RentCast monthly request limit reached; property sync stopped.");
       break;
     }
-    const params = new URLSearchParams({ limit: "100", status: "Active" });
-    if (search.zip_code) params.set("zipCode", search.zip_code);
+    const params = new URLSearchParams({ limit: search.id === -100 ? "500" : "100", status: "Active" });
+    if (search.id === -100) {
+      params.set("address", "Bentonville, AR");
+      params.set("radius", "40");
+      params.set("propertyType", "Multi-Family|Apartment");
+      params.set("price", "*:600000");
+    } else if (search.zip_code) params.set("zipCode", search.zip_code);
     else {
       if (search.city) params.set("city", search.city);
       if (search.state) params.set("state", search.state);
     }
-    if (search.min_price) params.set("priceMin", String(search.min_price));
-    if (search.max_price) params.set("priceMax", String(search.max_price));
+    if (search.id !== -100 && (search.min_price || search.max_price)) params.set("price", `${search.min_price ?? "*"}:${search.max_price ?? "*"}`);
     const response = await fetch(`https://api.rentcast.io/v1/listings/sale?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
     if (!response.ok) {
       console.error("Property feed request failed", search.id, response.status);
@@ -278,7 +317,7 @@ async function syncPropertyListings(env: Env) {
     }
     const listings = await response.json() as Array<Record<string, unknown>>;
     const now = Date.now();
-    for (const item of listings.slice(0, 100)) {
+    for (const item of listings.slice(0, search.id === -100 ? 500 : 100)) {
       const sourceId = String(item.id ?? "");
       const address = String(item.formattedAddress ?? "");
       if (!sourceId || !address) continue;
@@ -288,6 +327,7 @@ async function syncPropertyListings(env: Env) {
         .bind(sourceId, search.id, search.mode, address, item.city ?? null, item.state ?? null, item.zipCode ?? null, item.propertyType ?? null, item.price ?? null, item.bedrooms ?? null, item.bathrooms ?? null, item.squareFootage ?? null, item.lotSize ?? null, item.daysOnMarket ?? null, item.status ?? null, item.listedDate ?? null, null, JSON.stringify(item), now, now).run();
     }
   }
+  await rankNorthwestArkansas(env);
 }
 
 async function setup(request: Request, env: Env) {
@@ -373,10 +413,14 @@ const worker = {
         if (!username) return json({ error: "Please log in again." }, 401);
         return aiHealth(env);
       }
-      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties") {
+      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/sync") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
+        if (url.pathname === "/api/properties/sync" && request.method === "POST") {
+          ctx.waitUntil(syncPropertyListings(env));
+          return json({ ok: true, message: "The weekly property scan has started." }, 202);
+        }
         if (request.method === "GET") return propertyListings(request, env, username);
         return json({ error: "Method not allowed." }, 405);
       }
