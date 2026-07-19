@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import HqMenu from "../HqMenu";
 
 type Mode = "primary" | "income";
@@ -18,7 +18,8 @@ export default function PropertiesPage() {
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [showSearch, setShowSearch] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [findingPhoto, setFindingPhoto] = useState<string | null>(null);
+  const attemptedPhotos = useRef(new Set<string>());
+  const automaticPhotoCount = useRef(0);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -35,6 +36,19 @@ export default function PropertiesPage() {
   }, [mode]);
 
   useEffect(() => { load().catch((reason: Error) => setError(reason.message)); }, [load]);
+
+  useEffect(() => {
+    if (automaticPhotoCount.current >= 12) return;
+    const missing = listings.filter((listing) => !listing.image_url && !attemptedPhotos.current.has(`${listing.source_id}:${listing.search_id}`)).slice(0, Math.min(4, 12 - automaticPhotoCount.current));
+    if (!missing.length) return;
+    automaticPhotoCount.current += missing.length;
+    for (const listing of missing) attemptedPhotos.current.add(`${listing.source_id}:${listing.search_id}`);
+    Promise.allSettled(missing.map((listing) => fetch("/api/property-photo", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sourceId: listing.source_id, searchId: listing.search_id }),
+    }))).then(() => load().catch(() => undefined));
+  }, [listings, load]);
 
   async function addSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -102,15 +116,14 @@ export default function PropertiesPage() {
         <section className="property-grid">
           {listings.map((listing) => (
             <article className="property-card" key={`${listing.source_id}-${listing.search_label}`}>
-              {listing.image_url ? <a className="property-photo" href={listing.source_page_url} target="_blank" rel="noreferrer"><img src={`/api/property-image?sourceId=${encodeURIComponent(listing.source_id)}&searchId=${listing.search_id}`} alt={`Public listing preview for ${listing.address}`} loading="lazy" /></a> : <div className="property-photo placeholder"><span>No photo saved</span></div>}
+              {listing.image_url ? <a className="property-photo" href={listing.source_page_url || `https://www.google.com/search?q=${encodeURIComponent(`${listing.address} ${listing.city ?? ""} ${listing.state ?? ""} real estate listing`)}`} target="_blank" rel="noreferrer"><img src={`/api/property-image?sourceId=${encodeURIComponent(listing.source_id)}&searchId=${listing.search_id}`} alt={`Public listing preview for ${listing.address}`} loading="lazy" onError={(event) => { const image = event.currentTarget; if (image.src !== listing.image_url) image.src = listing.image_url!; else image.closest(".property-photo")?.classList.add("image-unavailable"); }} /></a> : <div className="property-photo placeholder"><span>Finding photo&hellip;</span></div>}
               <div className="property-card-top"><span>{listing.search_label}</span><small>{listing.ai_score ? `AI ${listing.ai_score}/100` : `${listing.days_on_market ?? "—"} days`}</small></div>
-              <h2>{listing.address}</h2>
+              <h2><a className="property-address-link" href={listing.source_page_url || `https://www.google.com/search?q=${encodeURIComponent(`${listing.address} ${listing.city ?? ""} ${listing.state ?? ""} real estate listing`)}`} target="_blank" rel="noreferrer">{listing.address}</a></h2>
               <p>{[listing.city, listing.state, listing.zip_code].filter(Boolean).join(", ")}</p>
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               {listing.latitude != null && listing.longitude != null && <button className="map-button" onClick={() => { setSelected(listing); window.scrollTo({ top: 420, behavior: "smooth" }); }}>View on map</button>}
-              {!listing.image_url && <button disabled={findingPhoto === listing.source_id} onClick={async () => { setFindingPhoto(listing.source_id); setError(""); const response = await fetch("/api/property-photo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId: listing.source_id, searchId: listing.search_id }) }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "No usable photo was found."); else await load(); setFindingPhoto(null); }}>{findingPhoto === listing.source_id ? "Finding photo…" : "Find public photo"}</button>}
               {listing.source_page_url && <a className="listing-link" href={listing.source_page_url} target="_blank" rel="noreferrer">Open listing ↗</a>}
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>

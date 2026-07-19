@@ -209,8 +209,8 @@ async function simplifyList(request: Request, env: Env, username: string) {
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
       instructions: kind === "grocery"
-        ? "Convert the request into a concise grocery shopping list. Return one item per line, no bullets, headings, quantities you cannot infer, or commentary."
-        : "Convert the request into a simple ordered action list. Each item must be a short, concrete, checkable task. Return one task per line, no bullets, headings, or commentary.",
+        ? "Convert the request into a concise grocery list while staying strictly grounded in what the user said. Preserve requested items and clearly implied ingredients only. Do not add complementary products, brands, quantities, meal ideas, pantry staples, or guesses. If the request is already a simple item, return it essentially unchanged. Return one item per line with no bullets, headings, or commentary. Prefer fewer accurate items over a more complete-looking list."
+        : "Turn the request into a short, practical checklist while staying strictly grounded in what the user said. You may split a stated goal into only the minimum steps that are directly necessary or clearly implied. Preserve the user's wording and level of detail when possible. Do not add planning, research, purchasing, scheduling, cleanup, follow-up, or other tasks unless the user mentioned or necessarily implied them. If the request is already one checkable task, return one task. Return one task per line with no bullets, headings, or commentary. Prefer fewer accurate tasks over an elaborate plan.",
       input,
     }),
   });
@@ -283,7 +283,7 @@ async function findPropertyPhoto(request: Request, env: Env, username: string) {
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
-      instructions: "Find a current public real-estate listing page for the exact US property address. Prefer Zillow, Redfin, Realtor.com, Homes.com, Trulia, Compass, Coldwell Banker, Keller Williams, LoopNet, or Crexi. Return only JSON in this form: {\"source_page_url\":\"https://...\"}. Do not return a search-results page or invent a URL.",
+      instructions: "Find a current public real-estate listing page and its main exterior property photo for the exact US property address. Prefer Zillow, Redfin, Realtor.com, Homes.com, Trulia, Compass, Coldwell Banker, Keller Williams, LoopNet, or Crexi. Return only JSON in this form: {\"source_page_url\":\"https://...\",\"image_url\":\"https://...\"}. The image_url must point directly to a real image of that exact property, not a logo, map, avatar, or search result. Do not invent URLs. If you cannot verify the direct image, return an empty image_url.",
       input: listing.address,
       tools: [{ type: "web_search" }],
     }),
@@ -291,11 +291,19 @@ async function findPropertyPhoto(request: Request, env: Env, username: string) {
   const aiPayload = await aiResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
   if (!aiResponse.ok) return json({ error: safeOpenAIError(aiResponse.status, aiPayload) }, 502);
   let sourcePage: URL | null = null;
+  let discoveredImage: string | null = null;
   try {
-    const parsed = JSON.parse(responseText(aiPayload).replace(/^```json\s*/i, "").replace(/```\s*$/, "")) as { source_page_url?: string };
+    const parsed = JSON.parse(responseText(aiPayload).replace(/^```json\s*/i, "").replace(/```\s*$/, "")) as { source_page_url?: string; image_url?: string };
     sourcePage = approvedListingUrl(String(parsed.source_page_url ?? ""));
+    if (sourcePage && parsed.image_url) discoveredImage = absoluteHttpsUrl(String(parsed.image_url), sourcePage);
   } catch { sourcePage = null; }
   if (!sourcePage) return json({ error: "No approved listing page was found for this address." }, 404);
+
+  if (discoveredImage) {
+    await env.DB.prepare("INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(sourceId, searchId, discoveredImage, sourcePage.toString(), Date.now()).run();
+    return json({ image_url: discoveredImage, source_page_url: sourcePage.toString() });
+  }
 
   const pageResponse = await fetch(sourcePage.toString(), { headers: { "user-agent": "Mozilla/5.0 (compatible; PauliHQ/1.0; private property research)" }, redirect: "follow" });
   if (!pageResponse.ok) return json({ error: "The listing website blocked its preview image." }, 502);
@@ -324,10 +332,15 @@ async function propertyImage(request: Request, env: Env, username: string) {
     imageUrl = new URL(media.image_url);
     if (imageUrl.protocol !== "https:" || imageUrl.hostname === "localhost" || /^\d+\.\d+\.\d+\.\d+$/.test(imageUrl.hostname)) throw new Error("Unsupported image host");
   } catch { return new Response("Unsupported image", { status: 400 }); }
-  const upstream = await fetch(imageUrl.toString(), { headers: { referer: media.source_page_url, "user-agent": "Mozilla/5.0 (compatible; PauliHQ/1.0; private property research)" }, redirect: "follow" });
-  const contentType = upstream.headers.get("content-type") ?? "";
+  const requestHeaders = { referer: media.source_page_url, accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36" };
+  let upstream = await fetch(imageUrl.toString(), { headers: requestHeaders, redirect: "follow" });
+  let contentType = upstream.headers.get("content-type") ?? "";
+  if (!upstream.ok || !contentType.startsWith("image/")) {
+    upstream = await fetch(imageUrl.toString(), { headers: { accept: requestHeaders.accept, "user-agent": requestHeaders["user-agent"] }, redirect: "follow" });
+    contentType = upstream.headers.get("content-type") ?? "";
+  }
   if (!upstream.ok || !contentType.startsWith("image/")) return new Response("Image unavailable", { status: 502 });
-  return new Response(upstream.body, { headers: { "content-type": contentType, "cache-control": "private, max-age=86400" } });
+  return new Response(upstream.body, { headers: { "content-type": contentType, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
 }
 
 async function reserveRentCastRequest(db: D1Database) {
