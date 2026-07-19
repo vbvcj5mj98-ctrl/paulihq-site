@@ -36,11 +36,10 @@ a { color: inherit; text-decoration: none; }
 .form-success { color: #2c6a4a; }
 .setup-card > p { margin: -4px 0 34px; color: #65675f; line-height: 1.55; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.hq-page { min-height: 100svh; padding-bottom: 80px; background: #e9e7df; color: var(--dark); }
+.hq-page { min-height: 100svh; background: #e9e7df; color: var(--dark); }
 .hq-header { height: 82px; padding: 0 max(28px, calc((100vw - 1240px) / 2)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #c7c4ba; }
 .hq-mark { font-weight: 700; letter-spacing: -.03em; }
 .hq-actions { display: flex; align-items: center; gap: 24px; font-size: .75rem; }
-.hq-actions span { padding: 6px 10px; border: 1px solid #b7b4ab; border-radius: 99px; color: #64665f; }
 .hq-actions a { border-bottom: 1px solid currentColor; }
 .hq-actions form { margin: 0; }
 .text-button { padding: 0 0 3px; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -48,13 +47,13 @@ a { color: inherit; text-decoration: none; }
 .hq-hero h1 { max-width: 850px; margin: 0 0 50px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(3.6rem, 7.5vw, 7rem); font-weight: 400; line-height: .95; letter-spacing: -.055em; }
 .ask-box { width: min(100%, 820px); min-height: 72px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; border: 1px solid #aaa89f; background: rgba(255,255,255,.36); color: #676961; font: inherit; text-align: left; }
 .ask-box strong { color: #8a5e49; font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; }
-.hq-grid { width: min(100% - 48px, 1240px); margin: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.hq-card { min-height: 260px; padding: 28px; display: flex; flex-direction: column; justify-content: space-between; border: 1px solid #c4c1b7; background: rgba(255,255,255,.24); }
-.hq-card.featured { background: #1b2929; color: #f4f1e9; border-color: #1b2929; }
-.card-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-size: .65rem; }
-.hq-card h2 { margin: 36px 0 8px; font-family: Georgia, 'Times New Roman', serif; font-size: 1.8rem; font-weight: 400; }
-.hq-card p { margin: 0; color: #65675f; line-height: 1.55; font-size: .9rem; }
-.hq-card.featured p { color: #c7cdc8; }
+.hq-grid { width: min(100% - 48px, 1240px); margin: auto; padding: 90px 0; display: grid; grid-template-columns: repeat(2, 1fr); border-top: 1px solid #c4c1b7; }
+.hq-card { min-height: 150px; padding: 28px 4px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #c4c1b7; background: transparent; }
+.hq-card:nth-child(odd) { padding-right: 32px; border-right: 1px solid #c4c1b7; }
+.hq-card:nth-child(even) { padding-left: 32px; }
+.hq-card h2 { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(1.8rem, 3vw, 2.7rem); font-weight: 400; letter-spacing: -.035em; }
+.hq-card > span { font-size: 1.3rem; transition: transform 160ms ease; }
+.hq-card:hover > span { transform: translateX(4px); }
 .card-status { margin-top: 28px; color: #888a82; font-size: .64rem; letter-spacing: .13em; text-transform: uppercase; }
 .card-link { width: fit-content; border-bottom: 1px solid currentColor; color: inherit; }
 
@@ -155,8 +154,8 @@ a { color: inherit; text-decoration: none; }
   .back-link { top: 24px; left: 22px; }
   .hq-header { height: 72px; padding: 0 22px; }
   .hq-hero { width: min(100% - 32px, 1240px); padding: 70px 0 44px; }
-  .hq-grid { width: min(100% - 32px, 1240px); grid-template-columns: 1fr; }
-  .hq-card { min-height: 230px; }
+  .hq-grid { width: min(100% - 32px, 1240px); padding-top: 54px; grid-template-columns: 1fr; }
+  .hq-card { min-height: 112px; padding: 22px 2px !important; border-right: 0 !important; }
   .chat-shell { padding: 42px 18px 145px; }
   .chat-starters { grid-template-columns: 1fr; }
   .chat-message { grid-template-columns: 38px 1fr; gap: 10px; }
