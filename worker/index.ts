@@ -9,6 +9,7 @@ interface Env {
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
   RENTCAST_API_KEY?: string;
+  GOOGLE_MAPS_API_KEY?: string;
 }
 
 interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; passThroughOnException(): void; }
@@ -78,6 +79,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS portfolio_properties_owner_idx ON portfolio_properties (owner, updated_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS portfolio_members (property_id INTEGER NOT NULL, username TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (property_id, username))"),
     db.prepare("CREATE INDEX IF NOT EXISTS portfolio_members_user_idx ON portfolio_members (username, property_id)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_valuation_cache (address_key TEXT PRIMARY KEY, formatted_address TEXT NOT NULL, estimated_value INTEGER NOT NULL, range_low INTEGER, range_high INTEGER, latitude REAL, longitude REAL, refreshed_at INTEGER NOT NULL)"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -325,14 +327,59 @@ async function propertyFavorite(request: Request, env: Env, username: string) {
   return json({ ok: true, favorite: Boolean(body.favorite) });
 }
 
-async function geocodeAddress(address: string) {
+async function geocodeAddress(address: string, env: Env) {
+  if (!env.GOOGLE_MAPS_API_KEY) return null;
   try {
-    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(address)}`, { headers: { "user-agent": "PauliHQ/1.0 (private property portfolio)" } });
+    const response = await fetch("https://places.googleapis.com/v1/places:searchText", { method: "POST", headers: { "content-type": "application/json", "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "places.formattedAddress,places.location" }, body: JSON.stringify({ textQuery: address, includedType: "street_address", strictTypeFiltering: false, regionCode: "US", maxResultCount: 1 }) });
     if (!response.ok) return null;
-    const results = await response.json() as Array<{ lat?: string; lon?: string }>;
-    const latitude = Number(results[0]?.lat); const longitude = Number(results[0]?.lon);
+    const result = await response.json() as { places?: Array<{ location?: { latitude?: number; longitude?: number } }> };
+    const latitude = Number(result.places?.[0]?.location?.latitude); const longitude = Number(result.places?.[0]?.location?.longitude);
     return Number.isFinite(latitude) && Number.isFinite(longitude) ? { latitude, longitude } : null;
   } catch { return null; }
+}
+
+async function addressAutocomplete(request: Request, env: Env) {
+  if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google address autocomplete is not connected yet." }, 503);
+  const body = await request.json<{ input?: string; sessionToken?: string }>();
+  const input = String(body.input ?? "").trim().slice(0, 180);
+  if (input.length < 3) return json({ suggestions: [] });
+  const response = await fetch("https://places.googleapis.com/v1/places:autocomplete", { method: "POST", headers: { "content-type": "application/json", "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text" }, body: JSON.stringify({ input, includedRegionCodes: ["us"], sessionToken: String(body.sessionToken ?? "").slice(0, 80) || undefined }) });
+  const payload = await response.json() as { suggestions?: Array<{ placePrediction?: { placeId?: string; text?: { text?: string } } }>; error?: { message?: string } };
+  if (!response.ok) return json({ error: "Address suggestions are temporarily unavailable." }, 502);
+  return json({ suggestions: (payload.suggestions ?? []).flatMap((item) => item.placePrediction?.placeId && item.placePrediction.text?.text ? [{ placeId: item.placePrediction.placeId, text: item.placePrediction.text.text }] : []) });
+}
+
+async function addressDetails(request: Request, env: Env) {
+  if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google address autocomplete is not connected yet." }, 503);
+  const body = await request.json<{ placeId?: string; sessionToken?: string }>();
+  const placeId = String(body.placeId ?? "").trim();
+  if (!placeId) return json({ error: "Choose an address." }, 400);
+  const query = new URLSearchParams();
+  if (body.sessionToken) query.set("sessionToken", String(body.sessionToken).slice(0, 80));
+  const response = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?${query}`, { headers: { "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "formattedAddress,location" } });
+  const payload = await response.json() as { formattedAddress?: string; location?: { latitude?: number; longitude?: number } };
+  if (!response.ok || !payload.formattedAddress) return json({ error: "Unable to load that address." }, 502);
+  return json({ address: payload.formattedAddress.replace(/, USA$/, ""), latitude: payload.location?.latitude, longitude: payload.location?.longitude });
+}
+
+async function portfolioValuation(request: Request, env: Env) {
+  if (!env.RENTCAST_API_KEY) return json({ error: "The property valuation connection is not configured." }, 503);
+  const body = await request.json<{ address?: string }>();
+  const address = String(body.address ?? "").trim().slice(0, 240);
+  if (!address) return json({ error: "Choose a complete street address first." }, 400);
+  const addressKey = address.toLowerCase().replace(/\s+/g, " ");
+  const cached = await env.DB.prepare("SELECT formatted_address, estimated_value, range_low, range_high, latitude, longitude, refreshed_at FROM property_valuation_cache WHERE address_key = ? AND refreshed_at > ?").bind(addressKey, Date.now() - 30 * 24 * 60 * 60_000).first<{ formatted_address: string; estimated_value: number; range_low: number | null; range_high: number | null; latitude: number | null; longitude: number | null; refreshed_at: number }>();
+  if (cached) return json({ address: cached.formatted_address, estimatedValue: cached.estimated_value, rangeLow: cached.range_low, rangeHigh: cached.range_high, latitude: cached.latitude, longitude: cached.longitude, cached: true });
+  if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
+  const params = new URLSearchParams({ address, compCount: "5", lookupSubjectAttributes: "true" });
+  const response = await fetch(`https://api.rentcast.io/v1/avm/value?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const payload = await response.json() as { price?: number; priceRangeLow?: number; priceRangeHigh?: number; subjectProperty?: { formattedAddress?: string; latitude?: number; longitude?: number }; message?: string };
+  if (!response.ok || !Number.isFinite(Number(payload.price))) return json({ error: "No automatic value estimate was available for that address." }, 422);
+  const formattedAddress = String(payload.subjectProperty?.formattedAddress || address).replace(/, USA$/, "");
+  const estimatedValue = Math.round(Number(payload.price));
+  await env.DB.prepare("INSERT INTO property_valuation_cache (address_key, formatted_address, estimated_value, range_low, range_high, latitude, longitude, refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(address_key) DO UPDATE SET formatted_address=excluded.formatted_address, estimated_value=excluded.estimated_value, range_low=excluded.range_low, range_high=excluded.range_high, latitude=excluded.latitude, longitude=excluded.longitude, refreshed_at=excluded.refreshed_at")
+    .bind(addressKey, formattedAddress, estimatedValue, Number(payload.priceRangeLow) || null, Number(payload.priceRangeHigh) || null, Number(payload.subjectProperty?.latitude) || null, Number(payload.subjectProperty?.longitude) || null, Date.now()).run();
+  return json({ address: formattedAddress, estimatedValue, rangeLow: payload.priceRangeLow, rangeHigh: payload.priceRangeHigh, latitude: payload.subjectProperty?.latitude, longitude: payload.subjectProperty?.longitude, cached: false });
 }
 
 async function portfolioUsers(env: Env) {
@@ -348,7 +395,7 @@ async function portfolio(request: Request, env: Env, username: string) {
       GROUP BY p.id ORDER BY p.updated_at DESC`).bind(username, username).all();
     return json({ properties: result.results ?? [] });
   }
-  const body = await request.json<{ id?: number; name?: string; address?: string; apn?: string; occupancy?: string; estimatedValue?: number; moneyOwed?: number; notes?: string; sharedWith?: string[] }>();
+  const body = await request.json<{ id?: number; name?: string; address?: string; apn?: string; occupancy?: string; estimatedValue?: number; moneyOwed?: number; notes?: string; latitude?: number; longitude?: number; sharedWith?: string[] }>();
   const name = String(body.name ?? "").trim().slice(0, 100);
   const address = String(body.address ?? "").trim().slice(0, 240);
   const apn = String(body.apn ?? "").trim().slice(0, 80);
@@ -361,7 +408,8 @@ async function portfolio(request: Request, env: Env, username: string) {
   const members = (validUsers.results ?? []).map((row) => row.username);
   if (request.method === "POST") {
     if (!name || (!address && !apn)) return json({ error: "Add a property name and either a full address or APN." }, 400);
-    const coordinates = address ? await geocodeAddress(address) : null;
+    const suppliedLatitude = Number(body.latitude); const suppliedLongitude = Number(body.longitude);
+    const coordinates = Number.isFinite(suppliedLatitude) && Number.isFinite(suppliedLongitude) ? { latitude: suppliedLatitude, longitude: suppliedLongitude } : address ? await geocodeAddress(address, env) : null;
     const now = Date.now();
     const created = await env.DB.prepare("INSERT INTO portfolio_properties (owner, name, address, apn, occupancy, estimated_value, money_owed, notes, latitude, longitude, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(username, name, address, apn, occupancy, estimatedValue, moneyOwed, notes, coordinates?.latitude ?? null, coordinates?.longitude ?? null, now, now).run();
@@ -379,7 +427,8 @@ async function portfolio(request: Request, env: Env, username: string) {
   }
   if (request.method === "PATCH") {
     if (!name || (!address && !apn)) return json({ error: "Add a property name and either a full address or APN." }, 400);
-    const coordinates = address && address !== owned.address ? await geocodeAddress(address) : null;
+    const suppliedLatitude = Number(body.latitude); const suppliedLongitude = Number(body.longitude);
+    const coordinates = Number.isFinite(suppliedLatitude) && Number.isFinite(suppliedLongitude) ? { latitude: suppliedLatitude, longitude: suppliedLongitude } : address && address !== owned.address ? await geocodeAddress(address, env) : null;
     await env.DB.prepare("UPDATE portfolio_properties SET name = ?, address = ?, apn = ?, occupancy = ?, estimated_value = ?, money_owed = ?, notes = ?, latitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, latitude) END, longitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, longitude) END, updated_at = ? WHERE id = ? AND owner = ?")
       .bind(name, address, apn, occupancy, estimatedValue, moneyOwed, notes, address, coordinates?.latitude ?? null, address, coordinates?.longitude ?? null, Date.now(), id, username).run();
     await env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id).run();
@@ -832,17 +881,37 @@ async function adminPassword(request: Request, env: Env, username: string) {
 }
 
 async function profileSettings(request: Request, env: Env, username: string) {
-  if (username !== "carsonpauli") return json({ error: "Only Carson can change the property refresh schedule." }, 403);
   if (request.method === "GET") {
     const preference = await env.DB.prepare("SELECT property_refresh FROM user_preferences WHERE username = ?").bind(username).first<{ property_refresh: string }>();
-    return json({ username, propertyRefresh: preference?.property_refresh ?? "weekly" });
+    return json({ username, isAdmin: username === "carsonpauli", propertyRefresh: preference?.property_refresh ?? "weekly" });
   }
+  if (username !== "carsonpauli") return json({ error: "Only Carson can change the property refresh schedule." }, 403);
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
   const body = await request.json<{ propertyRefresh?: string }>();
   const propertyRefresh = ["weekly", "daily", "twice_daily"].includes(String(body.propertyRefresh)) ? String(body.propertyRefresh) : "weekly";
   await env.DB.prepare("INSERT INTO user_preferences (username, property_refresh, updated_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET property_refresh=excluded.property_refresh, updated_at=excluded.updated_at")
     .bind(username, propertyRefresh, Date.now()).run();
   return json({ ok: true, propertyRefresh });
+}
+
+async function changeOwnPassword(request: Request, env: Env, username: string) {
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ currentPassword?: string; newPassword?: string }>();
+  const currentPassword = String(body.currentPassword ?? "");
+  const newPassword = String(body.newPassword ?? "");
+  if (newPassword.length < 12) return json({ error: "Use a new password with at least 12 characters." }, 400);
+  if (currentPassword === newPassword) return json({ error: "Choose a new password that is different from the current one." }, 400);
+  const user = await env.DB.prepare("SELECT password_hash, salt FROM users WHERE username = ?").bind(username).first<{ password_hash: string; salt: string }>();
+  if (!user || !secureEqual(await passwordHash(currentPassword, base64ToBytes(user.salt)), base64ToBytes(user.password_hash))) return json({ error: "The current password is incorrect." }, 401);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await passwordHash(newPassword, salt);
+  const currentTokenHash = await sha256(cookieValue(request, "paulihq_session"));
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?").bind(bytesToBase64(hash), bytesToBase64(salt), username),
+    env.DB.prepare("DELETE FROM sessions WHERE username = ? AND token_hash != ?").bind(username, currentTokenHash),
+    env.DB.prepare("DELETE FROM login_attempts WHERE username = ?").bind(username),
+  ]);
+  return json({ ok: true });
 }
 
 const worker = {
@@ -894,6 +963,11 @@ const worker = {
         if (!username) return json({ error: "Please log in again." }, 401);
         return profileSettings(request, env, username);
       }
+      if (url.pathname === "/api/change-password") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return changeOwnPassword(request, env, username);
+      }
       if (url.pathname.startsWith("/api/chat")) {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
@@ -914,6 +988,14 @@ const worker = {
         if (url.pathname === "/api/portfolio-users" && request.method === "GET") return portfolioUsers(env);
         if (url.pathname === "/api/portfolio-weather" && request.method === "GET") return portfolioWeather(request, env, username);
         return portfolio(request, env, username);
+      }
+      if (url.pathname === "/api/address-autocomplete" || url.pathname === "/api/address-details" || url.pathname === "/api/portfolio-value") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+        if (url.pathname === "/api/address-autocomplete") return addressAutocomplete(request, env);
+        if (url.pathname === "/api/address-details") return addressDetails(request, env);
+        return portfolioValuation(request, env);
       }
       if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image" || url.pathname === "/api/property-favorites") {
         const username = await authenticated(request, env);

@@ -1,12 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import HqHomeLink from "../HqHomeLink";
 import HqMenu from "../HqMenu";
 
 type Property = { id: number; owner: string; name: string; address: string; apn?: string; occupancy: "rented" | "primary" | "secondary" | "vacant"; estimated_value: number; money_owed: number; notes?: string; latitude?: number; longitude?: number; shared_with?: string };
 type Weather = { temperature_2m?: number; apparent_temperature?: number; weather_code?: number; wind_speed_10m?: number };
 type User = { username: string };
+type AddressSuggestion = { placeId: string; text: string };
 
 const weatherNames: Record<number, string> = { 0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Cloudy", 45: "Fog", 48: "Fog", 51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain", 71: "Light snow", 73: "Snow", 75: "Heavy snow", 80: "Rain showers", 81: "Rain showers", 82: "Heavy showers", 95: "Thunderstorms" };
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -27,6 +28,14 @@ export default function PortfolioPage() {
   const [editing, setEditing] = useState<Property | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
+  const [addressInput, setAddressInput] = useState("");
+  const [estimatedValueInput, setEstimatedValueInput] = useState("");
+  const [coordinates, setCoordinates] = useState<{ latitude?: number; longitude?: number }>({});
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
+  const [addressBusy, setAddressBusy] = useState(false);
+  const [valuationNote, setValuationNote] = useState("");
+  const sessionToken = useRef(crypto.randomUUID());
+  const suppressSuggestions = useRef(false);
   const load = useCallback(async () => {
     const [propertiesResponse, usersResponse, meResponse] = await Promise.all([fetch("/api/portfolio"), fetch("/api/portfolio-users"), fetch("/api/me")]);
     if (propertiesResponse.status === 401) return window.location.assign("/login");
@@ -37,10 +46,54 @@ export default function PortfolioPage() {
   }, []);
   useEffect(() => { load().catch((reason: Error) => setError(reason.message)); }, [load]);
 
+  useEffect(() => {
+    if (!(showForm || editing) || addressInput.trim().length < 4 || suppressSuggestions.current) { suppressSuggestions.current = false; setSuggestions([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch("/api/address-autocomplete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: addressInput, sessionToken: sessionToken.current }), signal: controller.signal });
+        const result = await response.json() as { suggestions?: AddressSuggestion[] };
+        setSuggestions(response.ok ? result.suggestions ?? [] : []);
+      } catch { if (!controller.signal.aborted) setSuggestions([]); }
+    }, 350);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [addressInput, editing, showForm]);
+
+  function startNew() {
+    setEditing(null); setShowForm(true); setAddressInput(""); setEstimatedValueInput(""); setCoordinates({}); setSuggestions([]); setValuationNote(""); sessionToken.current = crypto.randomUUID();
+  }
+
+  function startEdit(property: Property) {
+    setEditing(property); setShowForm(false); setAddressInput(property.address ?? ""); setEstimatedValueInput(String(property.estimated_value || "")); setCoordinates({ latitude: property.latitude, longitude: property.longitude }); setSuggestions([]); setValuationNote(""); sessionToken.current = crypto.randomUUID(); window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function estimateValue(address: string) {
+    if (!address.trim()) return;
+    setAddressBusy(true); setValuationNote("Finding current market estimate…");
+    const response = await fetch("/api/portfolio-value", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) });
+    const result = await response.json() as { address?: string; estimatedValue?: number; rangeLow?: number; rangeHigh?: number; latitude?: number; longitude?: number; error?: string };
+    if (response.ok && result.estimatedValue) {
+      if (result.address) { suppressSuggestions.current = true; setAddressInput(result.address); }
+      setEstimatedValueInput(String(result.estimatedValue));
+      setCoordinates((current) => ({ latitude: result.latitude ?? current.latitude, longitude: result.longitude ?? current.longitude }));
+      setValuationNote(result.rangeLow && result.rangeHigh ? `RentCast estimate range: ${money.format(result.rangeLow)}–${money.format(result.rangeHigh)}` : "RentCast market estimate added.");
+    } else setValuationNote(result.error || "No automatic estimate was available. You can enter a value manually.");
+    setAddressBusy(false);
+  }
+
+  async function chooseAddress(suggestion: AddressSuggestion) {
+    setAddressBusy(true); setSuggestions([]);
+    const response = await fetch("/api/address-details", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ placeId: suggestion.placeId, sessionToken: sessionToken.current }) });
+    const result = await response.json() as { address?: string; latitude?: number; longitude?: number; error?: string };
+    if (!response.ok || !result.address) { setAddressBusy(false); return setError(result.error || "Unable to select that address."); }
+    suppressSuggestions.current = true; setAddressInput(result.address); setCoordinates({ latitude: result.latitude, longitude: result.longitude }); sessionToken.current = crypto.randomUUID();
+    await estimateValue(result.address);
+  }
+
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError("");
     const form = event.currentTarget; const values = new FormData(form);
-    const response = await fetch("/api/portfolio", { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: editing?.id, name: values.get("name"), address: values.get("address"), apn: values.get("apn"), occupancy: values.get("occupancy"), estimatedValue: values.get("estimatedValue"), moneyOwed: values.get("moneyOwed"), notes: values.get("notes"), sharedWith: values.getAll("sharedWith") }) });
+    const response = await fetch("/api/portfolio", { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: editing?.id, name: values.get("name"), address: addressInput, apn: values.get("apn"), occupancy: values.get("occupancy"), estimatedValue: estimatedValueInput, moneyOwed: values.get("moneyOwed"), notes: values.get("notes"), latitude: coordinates.latitude, longitude: coordinates.longitude, sharedWith: values.getAll("sharedWith") }) });
     const result = await response.json() as { error?: string };
     if (!response.ok) return setError(result.error || "Unable to save the property.");
     form.reset(); setEditing(null); setShowForm(false); await load();
@@ -56,16 +109,16 @@ export default function PortfolioPage() {
   const totalValue = properties.reduce((total, property) => total + Number(property.estimated_value || 0), 0);
   const totalOwed = properties.reduce((total, property) => total + Number(property.money_owed || 0), 0);
   return <main className="properties-page">
-    <header className="properties-header"><HqHomeLink /><div className="properties-nav"><button onClick={() => { setEditing(null); setShowForm(true); }}>+ Add property</button><HqMenu current="/portfolio" /></div></header>
+    <header className="properties-header"><HqHomeLink /><div className="properties-nav"><button onClick={startNew}>+ Add property</button><HqMenu current="/portfolio" /></div></header>
     <section className="portfolio-shell">
       <div className="portfolio-heading"><div><p className="kicker">Owned properties</p><h1>Property Portfolio</h1></div><div className="portfolio-summary"><div><small>Estimated value</small><strong>{money.format(totalValue)}</strong></div><div><small>Money owed</small><strong>{money.format(totalOwed)}</strong></div><div className="portfolio-total"><small>Estimated net equity</small><strong>{money.format(totalValue - totalOwed)}</strong><span>{properties.length} {properties.length === 1 ? "property" : "properties"}</span></div></div></div>
       {(showForm || editing) && <form className="portfolio-form" onSubmit={save}>
         <div className="portfolio-form-title"><h2>{editing ? "Edit property" : "Add owned property"}</h2><button type="button" onClick={() => { setEditing(null); setShowForm(false); }}>Close</button></div>
         <label>Property name<input name="name" defaultValue={editing?.name} placeholder="Bentonville duplex" required /></label>
-        <label className="wide">Full address<input name="address" defaultValue={editing?.address} placeholder="Street, city, state, ZIP (optional when using an APN)" /></label>
+        <label className="wide portfolio-address-field">Full address<div><input name="address" value={addressInput} autoComplete="off" onChange={(event) => { setAddressInput(event.target.value); setCoordinates({}); setValuationNote(""); }} placeholder="Start typing a street address…" />{addressBusy && <span>Searching…</span>}{suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
         <label>APN<input name="apn" defaultValue={editing?.apn} placeholder="Assessor parcel number" /></label>
         <label>Use<select name="occupancy" defaultValue={editing?.occupancy ?? "rented"}><option value="rented">Rented</option><option value="primary">Primary residence</option><option value="secondary">Secondary residence</option><option value="vacant">Vacant</option></select></label>
-        <label>Estimated value<input name="estimatedValue" type="number" min="0" step="1000" defaultValue={editing?.estimated_value} placeholder="450000" /></label>
+        <label>Estimated value<div className="valuation-field"><input name="estimatedValue" type="number" min="0" step="1000" value={estimatedValueInput} onChange={(event) => setEstimatedValueInput(event.target.value)} placeholder="Select an address to estimate" /><button type="button" disabled={addressBusy || !addressInput.trim()} onClick={() => estimateValue(addressInput)}>Refresh</button></div>{valuationNote && <small className="valuation-note">{valuationNote}</small>}</label>
         <label>Money owed<input name="moneyOwed" type="number" min="0" step="100" defaultValue={editing?.money_owed} placeholder="275000" /></label>
         <label className="wide">General notes<textarea name="notes" defaultValue={editing?.notes} placeholder="Loan details, repairs, tenants, reminders, or anything else about this property." /></label>
         <fieldset className="wide"><legend>Share with</legend><div>{users.filter((user) => user.username !== username).map((user) => <label key={user.username}><input type="checkbox" name="sharedWith" value={user.username} defaultChecked={editing?.shared_with?.split(",").includes(user.username)} />{user.username}</label>)}</div></fieldset>
@@ -80,9 +133,9 @@ export default function PortfolioPage() {
           {property.address && <WeatherPanel property={property} />}
           {property.notes && <div className="portfolio-notes"><small>Notes</small><p>{property.notes}</p></div>}
           {property.shared_with && <p className="portfolio-shared">Shared with {property.shared_with.split(",").join(", ")}</p>}
-          {property.owner === username && <div className="portfolio-actions"><button onClick={() => { setEditing(property); setShowForm(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button><button onClick={() => remove(property)}>Remove</button></div>}
+          {property.owner === username && <div className="portfolio-actions"><button onClick={() => startEdit(property)}>Edit</button><button onClick={() => remove(property)}>Remove</button></div>}
         </article>)}
-        {!properties.length && <div className="portfolio-empty"><h2>No owned properties yet</h2><p>Add a property to start tracking its use, value, weather, and shared access.</p><button onClick={() => setShowForm(true)}>Add your first property</button></div>}
+        {!properties.length && <div className="portfolio-empty"><h2>No owned properties yet</h2><p>Add a property to start tracking its use, value, weather, and shared access.</p><button onClick={startNew}>Add your first property</button></div>}
       </section>
     </section>
   </main>;

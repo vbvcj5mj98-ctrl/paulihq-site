@@ -16,7 +16,7 @@ export default function PortalPage() {
   const [username, setUsername] = useState("");
   const [ready, setReady] = useState(false);
   useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setUsername(result.username ?? ""); setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); setReady(true); }).catch(() => setReady(true)); }, []);
-  const visibleSpaces = [...spaces.filter((space) => space.key === "portfolio" || permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", description: "Manage property refresh preferences and account settings.", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
+  const visibleSpaces = [...spaces.filter((space) => space.key === "portfolio" || permissions[space.key]), { key: "profile", title: "Profile", description: isAdmin ? "Manage your password, property refresh preferences, and account settings." : "Change your password and manage your account.", href: "/profile" }, ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
   const displayName = username === "carsonpauli" ? "Carson" : username === "jessipauli" ? "Jessi" : username;
   return (
     <main className="hq-page">

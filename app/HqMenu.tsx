@@ -14,7 +14,7 @@ export default function HqMenu({ current }: { current: string }) {
         {permissions.lists && <option value="/lists">Lists</option>}
         {permissions.properties && <option value="/properties">Property Finder</option>}
         <option value="/portfolio">Property Portfolio</option>
-        {current === "/profile" && <option value="/profile">Profile</option>}
+        <option value="/profile">Profile</option>
         {(permissions.user_management || current === "/admin/users") && <option value="/admin/users">User Management</option>}
       </select>
     </label>

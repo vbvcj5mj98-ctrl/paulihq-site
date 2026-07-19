@@ -12,6 +12,7 @@ export default function AssistantPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const firstConversationLoad = useRef(true);
 
   useEffect(() => {
     const suggestedPrompt = new URLSearchParams(window.location.search).get("prompt");
@@ -26,7 +27,12 @@ export default function AssistantPage() {
 
   useEffect(() => {
     const marker = endRef.current;
-    if (marker && typeof marker.scrollIntoView === "function") marker.scrollIntoView({ behavior: "smooth" });
+    const conversation = marker?.parentElement;
+    if (!conversation) return;
+    requestAnimationFrame(() => {
+      conversation.scrollTo({ top: conversation.scrollHeight, behavior: firstConversationLoad.current ? "auto" : "smooth" });
+      firstConversationLoad.current = false;
+    });
   }, [messages, busy]);
 
   async function send(event: FormEvent<HTMLFormElement>) {
