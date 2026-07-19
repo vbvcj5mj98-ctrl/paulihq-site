@@ -734,6 +734,36 @@ async function adminUsers(request: Request, env: Env, username: string) {
     const result = await env.DB.prepare("SELECT username, created_at FROM users ORDER BY created_at ASC").all();
     return json({ users: result.results ?? [] });
   }
+  if (request.method === "DELETE") {
+    if (username !== "carsonpauli") return json({ error: "Only Carson can delete users." }, 403);
+    const body = await request.json<{ username?: string }>();
+    const target = String(body.username ?? "").trim().toLowerCase();
+    if (!target) return json({ error: "Choose a user to delete." }, 400);
+    if (target === "carsonpauli") return json({ error: "Carson's owner account cannot be deleted." }, 400);
+    const existing = await env.DB.prepare("SELECT username FROM users WHERE username = ?").bind(target).first();
+    if (!existing) return json({ error: "User not found." }, 404);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM property_ai_rankings WHERE search_id IN (SELECT id FROM property_searches WHERE owner = ?)").bind(target),
+      env.DB.prepare("DELETE FROM property_coordinates WHERE search_id IN (SELECT id FROM property_searches WHERE owner = ?)").bind(target),
+      env.DB.prepare("DELETE FROM property_media WHERE search_id IN (SELECT id FROM property_searches WHERE owner = ?)").bind(target),
+      env.DB.prepare("DELETE FROM property_favorites WHERE username = ? OR search_id IN (SELECT id FROM property_searches WHERE owner = ?)").bind(target, target),
+      env.DB.prepare("DELETE FROM property_listings WHERE search_id IN (SELECT id FROM property_searches WHERE owner = ?)").bind(target),
+      env.DB.prepare("DELETE FROM property_searches WHERE owner = ?").bind(target),
+      env.DB.prepare("DELETE FROM portfolio_members WHERE username = ? OR property_id IN (SELECT id FROM portfolio_properties WHERE owner = ?)").bind(target, target),
+      env.DB.prepare("DELETE FROM portfolio_properties WHERE owner = ?").bind(target),
+      env.DB.prepare("DELETE FROM chat_messages WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM workspace_items WHERE owner = ?").bind(target),
+      env.DB.prepare("DELETE FROM list_items WHERE owner = ?").bind(target),
+      env.DB.prepare("DELETE FROM user_page_permissions WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM user_preferences WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM user_property_limits WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM user_property_usage WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM sessions WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM login_attempts WHERE username = ?").bind(target),
+      env.DB.prepare("DELETE FROM users WHERE username = ?").bind(target),
+    ]);
+    return json({ ok: true, username: target });
+  }
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
   const body = await request.json<{ username?: string; password?: string }>();
   const newUsername = String(body.username ?? "").trim().toLowerCase();

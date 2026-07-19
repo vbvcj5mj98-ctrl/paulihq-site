@@ -214,6 +214,10 @@ a { color: inherit; text-decoration: none; }
 .admin-users h2 { margin: 24px 0 10px; font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
 .admin-users > div { padding: 14px 4px; display: flex; justify-content: space-between; gap: 20px; border-bottom: 1px solid #cbc8be; }
 .admin-users span { color: #7b7d75; font-size: .72rem; }
+.admin-user-name { display: grid; gap: 4px; color: inherit !important; }
+.admin-user-name small { color: #7b7d75; font-size: .68rem; font-weight: 400; }
+.delete-user-button { min-height: 38px; padding: 0 12px; border: 1px solid #a96b62; background: transparent; color: #8b3227; font: inherit; font-size: .72rem; cursor: pointer; }
+.delete-user-button:disabled { opacity: .45; cursor: wait; }
 .access-panel { margin-top: 42px; border-top: 1px solid #bdbab0; }
 .access-panel h2 { margin: 24px 0 5px; font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
 .access-panel > p { margin: 0 0 18px; color: #777970; font-size: .8rem; }

@@ -68,6 +68,18 @@ export default function UserManagementPage() {
     if (!response.ok) setError(result.error || "Unable to save the Property Finder limit."); else setMessage(`Property Finder limit saved for ${user.username}.`);
   }
 
+  async function deleteUser(user: User) {
+    if (user.username === "carsonpauli") return;
+    const confirmed = window.confirm(`Delete ${user.username}? This permanently removes their login, sessions, private data, saved searches, and owned portfolio properties.`);
+    if (!confirmed) return;
+    setBusy(true); setError(""); setMessage("");
+    const response = await fetch("/api/admin/users", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: user.username }) });
+    const result = await response.json() as { username?: string; error?: string };
+    if (!response.ok) setError(result.error || "Unable to delete the user.");
+    else { setMessage(`${result.username} and their account data were deleted.`); await load(); }
+    setBusy(false);
+  }
+
   return <main className="lists-page">
     <header className="properties-header"><HqHomeLink /><HqMenu current="/admin/users" /></header>
     <section className="admin-shell">
@@ -81,7 +93,7 @@ export default function UserManagementPage() {
       {isOwner && <section className="access-panel"><h2>Page access</h2><p>Choose exactly what each person can open.</p>{accessUsers.map((user) => <div className="access-user" key={user.username}><strong>{user.username}</strong><div>{pageLabels.map(([key, label]) => <label key={key}><input type="checkbox" checked={Boolean(user.permissions?.[key])} disabled={user.username === "carsonpauli"} onChange={(event) => changeAccess(user, key, event.target.checked)} />{label}</label>)}</div></div>)}</section>}
       {isOwner && <section className="access-panel"><h2>Property Finder limits</h2><p>Set each person's maximum manual property searches per month. Zero disables manual searches.</p>{accessUsers.map((user) => <div className="property-limit-row" key={user.username}><span><strong>{user.username}</strong><small>{user.property_usage ?? 0} used this month</small></span><input type="number" min="0" max="50" value={user.property_limit ?? 5} aria-label={`Monthly Property Finder limit for ${user.username}`} onChange={(event) => setAccessUsers((current) => current.map((entry) => entry.username === user.username ? { ...entry, property_limit: Number(event.target.value) } : entry))} /><button type="button" onClick={() => savePropertyLimit(user)}>Save</button></div>)}</section>}
       {isOwner && <section className="access-panel"><h2>Reset password</h2><p>Set a new temporary password and sign that user out of their other sessions.</p><form className="password-reset-form" onSubmit={resetPassword}><select name="username" required defaultValue=""><option value="" disabled>Select user</option>{accessUsers.map((user) => <option value={user.username} key={user.username}>{user.username}</option>)}</select><input name="password" type="password" minLength={12} placeholder="New temporary password" autoComplete="new-password" required /><button type="submit" disabled={busy}>{busy ? "Saving…" : "Reset password"}</button></form></section>}
-      <section className="admin-users"><h2>Current users</h2>{users.map((user) => <div key={user.username}><strong>{user.username}</strong><span>Created {new Date(user.created_at).toLocaleDateString()}</span></div>)}</section>
+      <section className="admin-users"><h2>Current users</h2>{users.map((user) => <div key={user.username}><span className="admin-user-name"><strong>{user.username}</strong><small>Created {new Date(user.created_at).toLocaleDateString()}</small></span>{isOwner && user.username !== "carsonpauli" ? <button className="delete-user-button" type="button" disabled={busy} onClick={() => deleteUser(user)}>Delete user</button> : <span>{user.username === "carsonpauli" ? "Owner" : "Active"}</span>}</div>)}</section>
     </section>
   </main>;
 }
