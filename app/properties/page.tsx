@@ -9,6 +9,20 @@ type Listing = { source_id: string; search_id: number; address: string; city?: s
 type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
 type Usage = { requests: number; limit: number; period: string };
 
+function listingUrl(listing: Listing) {
+  return listing.source_page_url || `https://www.google.com/search?q=${encodeURIComponent(`${listing.address} ${listing.city ?? ""} ${listing.state ?? ""} ${listing.zip_code ?? ""} real estate listing`)}`;
+}
+
+function PropertyVisual({ listing }: { listing: Listing }) {
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const destination = listingUrl(listing);
+  if (listing.image_url && !photoFailed) {
+    return <a className="property-photo" href={destination} target="_blank" rel="noreferrer" aria-label={`View listing for ${listing.address}`}><img src={`/api/property-image?sourceId=${encodeURIComponent(listing.source_id)}&searchId=${listing.search_id}`} alt={`Property at ${listing.address}`} loading="lazy" onError={(event) => { const image = event.currentTarget; if (image.dataset.direct !== "true") { image.dataset.direct = "true"; image.src = listing.image_url!; } else setPhotoFailed(true); }} /></a>;
+  }
+  const location = encodeURIComponent([listing.address, listing.city, listing.state, listing.zip_code].filter(Boolean).join(", "));
+  return <div className="property-photo location-preview"><iframe title={`Location preview for ${listing.address}`} loading="lazy" tabIndex={-1} aria-hidden="true" src={`https://maps.google.com/maps?q=${location}&z=16&output=embed`} /><a href={destination} target="_blank" rel="noreferrer" aria-label={`View listing for ${listing.address}`}><span>{listing.image_url ? "Photo blocked · view listing" : "Finding photo · view listing"}</span></a></div>;
+}
+
 export default function PropertiesPage() {
   const [mode, setMode] = useState<Mode>("primary");
   const [listings, setListings] = useState<Listing[]>([]);
@@ -116,15 +130,15 @@ export default function PropertiesPage() {
         <section className="property-grid">
           {listings.map((listing) => (
             <article className="property-card" key={`${listing.source_id}-${listing.search_label}`}>
-              {listing.image_url ? <a className="property-photo" href={listing.source_page_url || `https://www.google.com/search?q=${encodeURIComponent(`${listing.address} ${listing.city ?? ""} ${listing.state ?? ""} real estate listing`)}`} target="_blank" rel="noreferrer"><img src={`/api/property-image?sourceId=${encodeURIComponent(listing.source_id)}&searchId=${listing.search_id}`} alt={`Public listing preview for ${listing.address}`} loading="lazy" onError={(event) => { const image = event.currentTarget; if (image.src !== listing.image_url) image.src = listing.image_url!; else image.closest(".property-photo")?.classList.add("image-unavailable"); }} /></a> : <div className="property-photo placeholder"><span>Finding photo&hellip;</span></div>}
+              <PropertyVisual listing={listing} />
               <div className="property-card-top"><span>{listing.search_label}</span><small>{listing.ai_score ? `AI ${listing.ai_score}/100` : `${listing.days_on_market ?? "—"} days`}</small></div>
-              <h2><a className="property-address-link" href={listing.source_page_url || `https://www.google.com/search?q=${encodeURIComponent(`${listing.address} ${listing.city ?? ""} ${listing.state ?? ""} real estate listing`)}`} target="_blank" rel="noreferrer">{listing.address}</a></h2>
+              <h2><a className="property-address-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">{listing.address}</a></h2>
               <p>{[listing.city, listing.state, listing.zip_code].filter(Boolean).join(", ")}</p>
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               {listing.latitude != null && listing.longitude != null && <button className="map-button" onClick={() => { setSelected(listing); window.scrollTo({ top: 420, behavior: "smooth" }); }}>View on map</button>}
-              {listing.source_page_url && <a className="listing-link" href={listing.source_page_url} target="_blank" rel="noreferrer">Open listing ↗</a>}
+              <a className="listing-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">View listing ↗</a>
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>
           ))}
