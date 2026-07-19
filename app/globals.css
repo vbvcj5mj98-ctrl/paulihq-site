@@ -98,7 +98,7 @@ a { color: inherit; text-decoration: none; }
 .properties-nav { display: flex; align-items: center; gap: 16px; }
 .assistant-bubble { position: fixed; right: 22px; bottom: 22px; z-index: 80; display: grid; justify-items: end; gap: 12px; }
 .assistant-launcher { width: 56px; height: 56px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #1b2929; color: #f4f1e8; box-shadow: 0 12px 34px rgba(24,35,34,.28); cursor: pointer; }
-.assistant-launcher span { font-size: .76rem; font-weight: 750; letter-spacing: .08em; }
+.assistant-launcher span { font-size: .67rem; font-weight: 750; letter-spacing: .045em; white-space: nowrap; }
 .assistant-bubble.open .assistant-launcher span { font-size: 1.45rem; font-weight: 300; }
 .assistant-popover { width: min(390px, calc(100vw - 28px)); height: min(560px, calc(100svh - 110px)); display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; border: 1px solid #b8b5ab; background: #f4f1e9; color: #1b2929; box-shadow: 0 24px 70px rgba(24,35,34,.26); }
 .assistant-popover > header { min-height: 67px; padding: 13px 16px 12px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #cbc7bc; background: #e5e1d6; }

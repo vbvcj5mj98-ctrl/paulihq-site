@@ -75,6 +75,6 @@ export default function AssistantBubble() {
       </div>
       <form onSubmit={send}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Ask Pauli HQ…" aria-label="Message Pauli HQ" rows={1} maxLength={8000} /><button type="submit" disabled={busy || !draft.trim()} aria-label="Send message">↑</button></form>
     </section>}
-    <button className="assistant-launcher" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? "Close Pauli HQ Assistant" : "Open Pauli HQ Assistant"}><span>{open ? "×" : "HQ"}</span></button>
+    <button className="assistant-launcher" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? "Close Pauli HQ AI" : "Open Pauli HQ AI"}><span>{open ? "×" : "HQ AI"}</span></button>
   </aside>;
 }
