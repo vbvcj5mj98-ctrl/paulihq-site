@@ -27,8 +27,14 @@ a { color: inherit; text-decoration: none; }
 .login-note { margin: 0 0 42px; color: #5c5e56; line-height: 1.6; }
 .login-form { display: grid; gap: 14px; }
 .login-form input { width: 100%; height: 56px; padding: 0 16px; border: 1px solid #b8b6ae; background: rgba(255,255,255,.38); color: var(--dark); font: inherit; outline: none; }
+.login-form select { width: 100%; height: 56px; padding: 0 16px; border: 1px solid #b8b6ae; background: #f3f1ea; color: var(--dark); font: inherit; }
 .login-form input:focus { border-color: var(--dark); }
 .login-form button { height: 56px; border: 0; background: var(--dark); color: var(--white); font: inherit; cursor: pointer; }
+.login-form button:disabled { opacity: .6; cursor: wait; }
+.form-error, .form-success { margin: 0; font-size: .8rem; line-height: 1.45; }
+.form-error { color: #9d3629; }
+.form-success { color: #2c6a4a; }
+.setup-card > p { margin: -4px 0 34px; color: #65675f; line-height: 1.55; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .hq-page { min-height: 100svh; padding-bottom: 80px; background: #e9e7df; color: var(--dark); }
 .hq-header { height: 82px; padding: 0 max(28px, calc((100vw - 1240px) / 2)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #c7c4ba; }
@@ -36,6 +42,8 @@ a { color: inherit; text-decoration: none; }
 .hq-actions { display: flex; align-items: center; gap: 24px; font-size: .75rem; }
 .hq-actions span { padding: 6px 10px; border: 1px solid #b7b4ab; border-radius: 99px; color: #64665f; }
 .hq-actions a { border-bottom: 1px solid currentColor; }
+.hq-actions form { margin: 0; }
+.text-button { padding: 0 0 3px; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .hq-hero { width: min(100% - 48px, 1240px); margin: auto; padding: 100px 0 64px; }
 .hq-hero h1 { max-width: 850px; margin: 0 0 50px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(3.6rem, 7.5vw, 7rem); font-weight: 400; line-height: .95; letter-spacing: -.055em; }
 .ask-box { width: min(100%, 820px); min-height: 72px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; border: 1px solid #aaa89f; background: rgba(255,255,255,.36); color: #676961; font: inherit; text-align: left; }

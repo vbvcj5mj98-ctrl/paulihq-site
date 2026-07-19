@@ -16,7 +16,9 @@ export default function PortalPage() {
         <Link className="hq-mark" href="/">Pauli HQ</Link>
         <div className="hq-actions">
           <span>Private</span>
-          <a href="/cdn-cgi/access/logout">Log out</a>
+          <form action="/api/logout" method="post">
+            <button type="submit" className="text-button">Log out</button>
+          </form>
         </div>
       </header>
 

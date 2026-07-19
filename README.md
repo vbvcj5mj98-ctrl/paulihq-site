@@ -1,24 +1,25 @@
 # Pauli HQ
 
-A Cloudflare-first family website with a public photo landing page and a private portal protected by Cloudflare Access.
+A Cloudflare-first family website with a public photo landing page, two private accounts, and a post-login workspace designed for future AI tools.
 
 ## Cloudflare deployment
 
-1. In Cloudflare, open **Workers & Pages** and choose **Create application**.
-2. Import this GitHub repository.
-3. Use `npm run build` as the build command and `npx wrangler deploy` as the deploy command if Cloudflare does not fill them automatically.
-4. Deploy, then add the purchased domain under **Settings > Domains & Routes**.
+1. In Cloudflare, open **Workers & Pages** and import this GitHub repository.
+2. Use `npm run build` as the build command and `npx wrangler deploy` as the deploy command.
+3. Add `paulihq.com` under **Settings > Domains & Routes**.
 
-## Protect the private portal
+Cloudflare automatically provisions the `DB` D1 binding declared in `wrangler.jsonc`. Authentication tables are created on first use.
 
-Do this before placing private information in the portal.
+## Set up the two accounts
 
-1. Open **Zero Trust > Integrations > Identity providers** and add **One-time PIN**.
-2. Open **Zero Trust > Access controls > Applications**.
-3. Create a **Self-hosted and private** application.
-4. Add the public hostname using your domain and path `/portal/*`.
-5. Create an **Allow** policy using the **Emails** selector.
-6. Enter exactly the two approved email addresses—one for Carson and one for his wife.
-7. Select **One-time PIN** as the login method and save.
+The approved usernames are `carsonpauli` and `jessipauli`. Passwords are never committed to GitHub.
 
-Cloudflare will intercept `/portal` before the website loads and email an expiring sign-in code to either approved address. Never commit passwords or secrets to this repository.
+1. In **Workers & Pages > paulihq-site > Settings > Variables and Secrets**, add an encrypted secret named `SETUP_CODE` with a private value known only to the family.
+2. Redeploy the current version if Cloudflare requests it.
+3. Visit `https://paulihq.com/setup`.
+4. Configure each username with a unique password of at least 12 characters, using the private setup code.
+5. Sign in at `https://paulihq.com/login`.
+
+Passwords are salted and hashed with PBKDF2. Failed login attempts are rate-limited, and sessions use random tokens stored in D1 with secure HTTP-only cookies.
+
+Never commit passwords, the setup code, API keys, or other secrets to this repository.
