@@ -2,9 +2,8 @@ import Link from "next/link";
 
 const spaces = [
   { title: "Assistant", href: "/assistant" },
-  { title: "Projects", href: "/lists" },
+  { title: "Lists", href: "/lists" },
   { title: "Property Finder", href: "/properties" },
-  { title: "Grocery List", href: "/lists?tab=grocery" },
 ];
 
 export default function PortalPage() {

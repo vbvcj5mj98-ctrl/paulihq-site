@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
 type Mode = "primary" | "income";
-type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string };
+type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string; latitude?: number; longitude?: number };
 type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
 type Usage = { requests: number; limit: number; period: string };
 
@@ -13,6 +13,7 @@ export default function PropertiesPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [searches, setSearches] = useState<Search[]>([]);
   const [sourceConnected, setSourceConnected] = useState(false);
+  const [selected, setSelected] = useState<Listing | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [showSearch, setShowSearch] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -25,6 +26,7 @@ export default function PropertiesPage() {
     const searchData = await searchResponse.json() as { searches?: Search[] };
     if (!listingResponse.ok) throw new Error(listingData.error || "Unable to load properties.");
     setListings(listingData.listings ?? []);
+    setSelected((current) => current ?? listingData.listings?.find((listing) => listing.latitude != null && listing.longitude != null) ?? null);
     setSourceConnected(Boolean(listingData.sourceConnected));
     if (listingData.usage) setUsage(listingData.usage);
     setSearches(searchData.searches ?? []);
@@ -88,6 +90,12 @@ export default function PropertiesPage() {
         <div className="property-feed-state"><small>{sourceConnected ? `Weekly feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>{sourceConnected && <button disabled={syncing} onClick={async () => { setSyncing(true); setError(""); const response = await fetch("/api/properties/sync", { method: "POST" }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "Unable to start the scan."); window.setTimeout(() => { setSyncing(false); load().catch(() => undefined); }, 5000); }}>{syncing ? "Scanning…" : "Scan now"}</button>}</div>
       </section>
       {error && <p className="property-error" role="alert">{error}</p>}
+      {selected?.latitude != null && selected.longitude != null && (
+        <section className="property-map">
+          <iframe title={`Map showing ${selected.address}`} loading="lazy" referrerPolicy="no-referrer" src={`https://www.openstreetmap.org/export/embed.html?bbox=${selected.longitude - .04}%2C${selected.latitude - .025}%2C${selected.longitude + .04}%2C${selected.latitude + .025}&layer=mapnik&marker=${selected.latitude}%2C${selected.longitude}`} />
+          <div><strong>{selected.address}</strong><span>{selected.ai_score ? `AI score ${selected.ai_score}/100` : "Selected property"}</span><a href={`https://www.openstreetmap.org/?mlat=${selected.latitude}&mlon=${selected.longitude}#map=14/${selected.latitude}/${selected.longitude}`} target="_blank" rel="noreferrer">Open larger map ↗</a></div>
+        </section>
+      )}
       {listings.length ? (
         <section className="property-grid">
           {listings.map((listing) => (
@@ -98,6 +106,7 @@ export default function PropertiesPage() {
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
+              {listing.latitude != null && listing.longitude != null && <button className="map-button" onClick={() => { setSelected(listing); window.scrollTo({ top: 420, behavior: "smooth" }); }}>View on map</button>}
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>
           ))}
