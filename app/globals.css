@@ -15,7 +15,10 @@ a { color: inherit; text-decoration: none; }
   background: url('/pauli-water.jpg') center center / cover no-repeat;
 }
 .shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(7, 18, 20, .68) 0%, rgba(7, 18, 20, .18) 62%, rgba(7, 18, 20, .3) 100%); }
-.photo-header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: flex-end; padding: 32px 42px; }
+.photo-header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: 32px 42px; }
+.pauli-wordmark { font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif; font-weight: 900; line-height: .8; letter-spacing: -.055em; }
+.pauli-wordmark-home { color: #f1eee6; font-size: clamp(2.7rem, 5vw, 4.8rem); text-shadow: 0 2px 18px rgba(0,0,0,.18); }
+.pauli-wordmark-portal { color: #1b2929; font-size: 2rem; }
 .login-link { padding: 11px 19px; border: 1px solid rgba(255,255,255,.65); border-radius: 100px; font-size: .8rem; transition: background 180ms ease, color 180ms ease; }
 .login-link:hover { background: var(--white); color: var(--dark); }
 .kicker { margin: 0 0 22px; font-size: .69rem; font-weight: 650; letter-spacing: .18em; text-transform: uppercase; }
@@ -188,6 +191,14 @@ a { color: inherit; text-decoration: none; }
 .access-user > div { display: flex; flex-wrap: wrap; gap: 10px 18px; }
 .access-user label { display: flex; align-items: center; gap: 7px; font-size: .78rem; }
 .access-user input { width: 17px; height: 17px; accent-color: #1b2929; }
+.password-reset-form { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 9px; }
+.password-reset-form select, .password-reset-form input { min-height: 46px; padding: 0 12px; border: 1px solid #aaa89f; background: #f6f4ee; color: inherit; font: inherit; }
+.password-reset-form button { min-height: 46px; padding: 0 15px; border: 1px solid #1b2929; background: #1b2929; color: white; font: inherit; cursor: pointer; }
+.property-limit-row { min-height: 68px; display: grid; grid-template-columns: 1fr 90px 70px; gap: 9px; align-items: center; border-bottom: 1px solid #cbc8be; }
+.property-limit-row span { display: grid; gap: 3px; }
+.property-limit-row small { color: #7b7d75; font-size: .68rem; }
+.property-limit-row input { min-height: 42px; padding: 0 10px; border: 1px solid #aaa89f; background: #f6f4ee; color: inherit; font: inherit; }
+.property-limit-row button { min-height: 42px; border: 1px solid #1b2929; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .feature-error { min-height: 100svh; padding: 32px; display: grid; place-content: center; gap: 16px; background: #e9e7df; color: #141713; text-align: center; }
 .feature-error h1 { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 400; }
 .feature-error p { margin: 0; color: #686a63; }
@@ -224,6 +235,7 @@ a { color: inherit; text-decoration: none; }
   .property-map { width: min(calc(100% - 32px), 1240px); height: 390px; }
   .lists-shell { width: min(calc(100% - 32px), 900px); padding-top: 52px; }
   .list-capture > div { flex-direction: column; }
+  .password-reset-form { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

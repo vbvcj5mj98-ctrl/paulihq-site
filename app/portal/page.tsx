@@ -17,7 +17,7 @@ export default function PortalPage() {
   return (
     <main className="hq-page">
       <header className="hq-header">
-        <Link className="hq-mark" href="/">Pauli HQ</Link>
+        <Link className="pauli-wordmark pauli-wordmark-portal" href="/">PAULI HQ</Link>
         <div className="hq-actions">
           <form action="/api/logout" method="post">
             <button type="submit" className="text-button">Log out</button>

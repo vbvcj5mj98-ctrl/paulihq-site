@@ -5,6 +5,7 @@ export default function Home() {
     <main className="photo-page">
       <div className="shade" />
       <header className="photo-header">
+        <span className="pauli-wordmark pauli-wordmark-home">PAULI HQ</span>
         <Link className="login-link" href="/login">
           Log in
         </Link>

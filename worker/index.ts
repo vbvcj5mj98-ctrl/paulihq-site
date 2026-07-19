@@ -70,6 +70,8 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_preferences (username TEXT PRIMARY KEY, property_refresh TEXT NOT NULL DEFAULT 'weekly' CHECK(property_refresh IN ('weekly', 'daily', 'twice_daily')), updated_at INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_page_permissions (username TEXT NOT NULL, page_key TEXT NOT NULL CHECK(page_key IN ('assistant', 'lists', 'properties', 'user_management')), allowed INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, page_key))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS user_property_limits (username TEXT PRIMARY KEY, monthly_limit INTEGER NOT NULL CHECK(monthly_limit >= 0 AND monthly_limit <= 50), updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS user_property_usage (username TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, period))"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -317,7 +319,12 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   } catch { return json({ error: "The request could not be converted into property filters. Try including a city, state, or ZIP code." }, 422); }
   const location = String(filters.location ?? "").trim().slice(0, 160);
   if (!location) return json({ error: "Please include a city, state, ZIP code, or property address." }, 400);
-  if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The 50-request monthly property-data limit has been reached." }, 429);
+  const userReservation = await reserveUserPropertyRequest(env.DB, username);
+  if (!userReservation.ok) return json({ error: `Your monthly Property Finder limit of ${userReservation.limit} request${userReservation.limit === 1 ? "" : "s"} has been reached.` }, 429);
+  if (!(await reserveRentCastRequest(env.DB))) {
+    await env.DB.prepare("UPDATE user_property_usage SET requests = MAX(0, requests - 1), updated_at = ? WHERE username = ? AND period = ?").bind(Date.now(), username, userReservation.period).run();
+    return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
+  }
 
   const allowedTypes = new Set(["Single Family", "Condo", "Townhouse", "Multi-Family", "Apartment", "Land"]);
   const propertyTypes = (filters.property_types ?? []).filter((type) => allowedTypes.has(type));
@@ -450,6 +457,15 @@ async function reserveRentCastRequest(db: D1Database) {
   const reservation = await db.prepare("UPDATE api_usage SET requests = requests + 1, updated_at = ? WHERE service = 'rentcast' AND period = ? AND requests < ?")
     .bind(Date.now(), period, monthlyRentCastRequestLimit).run();
   return Number(reservation.meta.changes ?? 0) === 1;
+}
+
+async function reserveUserPropertyRequest(db: D1Database, username: string) {
+  const period = new Date().toISOString().slice(0, 7);
+  const configured = await db.prepare("SELECT monthly_limit FROM user_property_limits WHERE username = ?").bind(username).first<{ monthly_limit: number }>();
+  const limit = configured?.monthly_limit ?? (username === "carsonpauli" ? 50 : 5);
+  await db.prepare("INSERT OR IGNORE INTO user_property_usage (username, period, requests, updated_at) VALUES (?, ?, 0, ?)").bind(username, period, Date.now()).run();
+  const reservation = await db.prepare("UPDATE user_property_usage SET requests = requests + 1, updated_at = ? WHERE username = ? AND period = ? AND requests < ?").bind(Date.now(), username, period, limit).run();
+  return { ok: Number(reservation.meta.changes ?? 0) === 1, limit, period };
 }
 
 async function rankNorthwestArkansas(env: Env) {
@@ -618,7 +634,9 @@ async function adminAccess(request: Request, env: Env, username: string) {
   if (request.method === "GET") {
     const users = await env.DB.prepare("SELECT username, created_at FROM users ORDER BY created_at ASC").all<{ username: string; created_at: number }>();
     const permissions = await env.DB.prepare("SELECT username, page_key, allowed FROM user_page_permissions").all<{ username: string; page_key: string; allowed: number }>();
-    return json({ users: (users.results ?? []).map((user) => ({ ...user, permissions: user.username === "carsonpauli" ? Object.fromEntries(pageKeys.map((page) => [page, true])) : Object.fromEntries(pageKeys.map((page) => [page, (permissions.results ?? []).some((item) => item.username === user.username && item.page_key === page && item.allowed === 1)])) })) });
+    const limits = await env.DB.prepare("SELECT username, monthly_limit FROM user_property_limits").all<{ username: string; monthly_limit: number }>();
+    const usage = await env.DB.prepare("SELECT username, requests FROM user_property_usage WHERE period = ?").bind(new Date().toISOString().slice(0, 7)).all<{ username: string; requests: number }>();
+    return json({ users: (users.results ?? []).map((user) => ({ ...user, property_limit: (limits.results ?? []).find((item) => item.username === user.username)?.monthly_limit ?? (user.username === "carsonpauli" ? 50 : 5), property_usage: (usage.results ?? []).find((item) => item.username === user.username)?.requests ?? 0, permissions: user.username === "carsonpauli" ? Object.fromEntries(pageKeys.map((page) => [page, true])) : Object.fromEntries(pageKeys.map((page) => [page, (permissions.results ?? []).some((item) => item.username === user.username && item.page_key === page && item.allowed === 1)])) })) });
   }
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
   const body = await request.json<{ username?: string; permissions?: Record<string, boolean> }>();
@@ -629,6 +647,38 @@ async function adminAccess(request: Request, env: Env, username: string) {
   const now = Date.now();
   await env.DB.batch(pageKeys.map((page) => env.DB.prepare("INSERT INTO user_page_permissions (username, page_key, allowed, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(username, page_key) DO UPDATE SET allowed=excluded.allowed, updated_at=excluded.updated_at").bind(target, page, body.permissions?.[page] ? 1 : 0, now)));
   return json({ ok: true });
+}
+
+async function adminPropertyLimit(request: Request, env: Env, username: string) {
+  if (username !== "carsonpauli") return json({ error: "Only Carson can change Property Finder limits." }, 403);
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ username?: string; monthlyLimit?: number }>();
+  const target = String(body.username ?? "").trim().toLowerCase();
+  const monthlyLimit = Math.max(0, Math.min(50, Math.floor(Number(body.monthlyLimit))));
+  if (!Number.isFinite(monthlyLimit)) return json({ error: "Enter a limit from 0 to 50." }, 400);
+  const user = await env.DB.prepare("SELECT username FROM users WHERE username = ?").bind(target).first();
+  if (!user) return json({ error: "User not found." }, 404);
+  await env.DB.prepare("INSERT INTO user_property_limits (username, monthly_limit, updated_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET monthly_limit=excluded.monthly_limit, updated_at=excluded.updated_at").bind(target, monthlyLimit, Date.now()).run();
+  return json({ ok: true, username: target, monthlyLimit });
+}
+
+async function adminPassword(request: Request, env: Env, username: string) {
+  if (username !== "carsonpauli") return json({ error: "Only Carson can reset user passwords." }, 403);
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ username?: string; password?: string }>();
+  const target = String(body.username ?? "").trim().toLowerCase();
+  const password = String(body.password ?? "");
+  if (password.length < 12) return json({ error: "Use a temporary password with at least 12 characters." }, 400);
+  const user = await env.DB.prepare("SELECT username FROM users WHERE username = ?").bind(target).first();
+  if (!user) return json({ error: "User not found." }, 404);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await passwordHash(password, salt);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?").bind(bytesToBase64(hash), bytesToBase64(salt), target),
+    env.DB.prepare("DELETE FROM sessions WHERE username = ?").bind(target),
+    env.DB.prepare("DELETE FROM login_attempts WHERE username = ?").bind(target),
+  ]);
+  return json({ ok: true, username: target });
 }
 
 async function profileSettings(request: Request, env: Env, username: string) {
@@ -678,6 +728,16 @@ const worker = {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         return adminAccess(request, env, username);
+      }
+      if (url.pathname === "/api/admin/password") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return adminPassword(request, env, username);
+      }
+      if (url.pathname === "/api/admin/property-limit") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return adminPropertyLimit(request, env, username);
       }
       if (url.pathname === "/api/profile") {
         const username = await authenticated(request, env);
