@@ -1,12 +1,13 @@
 import Link from "next/link";
 
 const spaces = [
-  { icon: "AI", title: "HQ Assistant", text: "Ask questions, organize plans, and turn ideas into action." },
-  { icon: "01", title: "Projects", text: "Track active builds, ideas, decisions, and next steps." },
+  { icon: "AI", title: "HQ Assistant", text: "Ask questions, organize plans, and work across everything in Pauli HQ.", href: "/assistant" },
+  { icon: "01", title: "Projects & Lists", text: "Speak or type a plan and let AI turn it into simple, checkable steps.", href: "/lists" },
   { icon: "02", title: "Documents", text: "A searchable home for important files and family records." },
-  { icon: "03", title: "Property", text: "Keep property notes, plans, maintenance, and opportunities together." },
+  { icon: "03", title: "Property Finder", text: "Track primary residences and analyze income-property opportunities.", href: "/properties" },
   { icon: "04", title: "Calendar", text: "See shared events, deadlines, reminders, and upcoming work." },
   { icon: "05", title: "Ideas", text: "Capture possibilities now and let AI help develop them later." },
+  { icon: "06", title: "Grocery List", text: "Build and share an organized shopping list using voice or text.", href: "/lists?tab=grocery" },
 ];
 
 export default function PortalPage() {
@@ -25,10 +26,10 @@ export default function PortalPage() {
       <section className="hq-hero">
         <p className="kicker">Your private workspace</p>
         <h1>What should we work on?</h1>
-        <button type="button" className="ask-box" aria-label="AI assistant coming soon">
+        <Link href="/assistant" className="ask-box" aria-label="Open the Pauli HQ assistant">
           <span>Ask Pauli HQ anything...</span>
-          <strong>Coming soon</strong>
-        </button>
+          <strong>Open assistant</strong>
+        </Link>
       </section>
 
       <section className="hq-grid" aria-label="Pauli HQ spaces">
@@ -39,7 +40,7 @@ export default function PortalPage() {
               <h2>{space.title}</h2>
               <p>{space.text}</p>
             </div>
-            <span className="card-status">Coming soon</span>
+            {space.href ? <Link className="card-status card-link" href={space.href}>Open now →</Link> : <span className="card-status">Coming soon</span>}
           </article>
         ))}
       </section>
