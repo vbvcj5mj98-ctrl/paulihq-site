@@ -67,6 +67,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS api_usage (service TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (service, period))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_ai_rankings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, score INTEGER NOT NULL, summary TEXT NOT NULL, ranked_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_coordinates (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, PRIMARY KEY (source_id, search_id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
   ]);
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
 }
@@ -241,12 +242,72 @@ async function propertySearches(request: Request, env: Env, username: string) {
 
 async function propertyListings(request: Request, env: Env, username: string) {
   const mode = new URL(request.url).searchParams.get("mode") === "income" ? "income" : "primary";
-  const result = await env.DB.prepare(`SELECT l.source_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude
-    FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id
+  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url
+    FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id
     WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
   return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
+}
+
+const approvedListingHosts = ["zillow.com", "redfin.com", "realtor.com", "homes.com", "trulia.com", "compass.com", "coldwellbankerhomes.com", "kw.com", "loopnet.com", "crexi.com"];
+
+function approvedListingUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && approvedListingHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)) ? url : null;
+  } catch { return null; }
+}
+
+function absoluteHttpsUrl(value: string, base: URL) {
+  try {
+    const url = new URL(value, base);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch { return null; }
+}
+
+async function findPropertyPhoto(request: Request, env: Env, username: string) {
+  if (!env.OPENAI_API_KEY) return json({ error: "The AI connection is not configured." }, 503);
+  const body = await request.json<{ sourceId?: string; searchId?: number }>();
+  const sourceId = String(body.sourceId ?? "").slice(0, 300);
+  const searchId = Number(body.searchId);
+  const listing = await env.DB.prepare(`SELECT l.address, s.owner FROM property_listings l JOIN property_searches s ON s.id = l.search_id
+    WHERE l.source_id = ? AND l.search_id = ? AND (s.owner = ? OR s.owner = 'shared')`).bind(sourceId, searchId, username).first<{ address: string; owner: string }>();
+  if (!listing) return json({ error: "Property not found." }, 404);
+  const cached = await env.DB.prepare("SELECT image_url, source_page_url FROM property_media WHERE source_id = ? AND search_id = ?").bind(sourceId, searchId).first<{ image_url: string; source_page_url: string }>();
+  if (cached) return json(cached);
+
+  const aiResponse = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      instructions: "Find a current public real-estate listing page for the exact US property address. Prefer Zillow, Redfin, Realtor.com, Homes.com, Trulia, Compass, Coldwell Banker, Keller Williams, LoopNet, or Crexi. Return only JSON in this form: {\"source_page_url\":\"https://...\"}. Do not return a search-results page or invent a URL.",
+      input: listing.address,
+      tools: [{ type: "web_search" }],
+    }),
+  });
+  const aiPayload = await aiResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  if (!aiResponse.ok) return json({ error: safeOpenAIError(aiResponse.status, aiPayload) }, 502);
+  let sourcePage: URL | null = null;
+  try {
+    const parsed = JSON.parse(responseText(aiPayload).replace(/^```json\s*/i, "").replace(/```\s*$/, "")) as { source_page_url?: string };
+    sourcePage = approvedListingUrl(String(parsed.source_page_url ?? ""));
+  } catch { sourcePage = null; }
+  if (!sourcePage) return json({ error: "No approved listing page was found for this address." }, 404);
+
+  const pageResponse = await fetch(sourcePage.toString(), { headers: { "user-agent": "Mozilla/5.0 (compatible; PauliHQ/1.0; private property research)" }, redirect: "follow" });
+  if (!pageResponse.ok) return json({ error: "The listing website blocked its preview image." }, 502);
+  const finalPage = approvedListingUrl(pageResponse.url);
+  if (!finalPage) return json({ error: "The listing redirected to an unsupported website." }, 502);
+  const html = (await pageResponse.text()).slice(0, 1_500_000);
+  const match = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+    ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:image["']/i);
+  const imageUrl = match ? absoluteHttpsUrl(match[1].replaceAll("&amp;", "&"), finalPage) : null;
+  if (!imageUrl) return json({ error: "That listing page does not expose a usable preview image." }, 404);
+  await env.DB.prepare("INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)")
+    .bind(sourceId, searchId, imageUrl, finalPage.toString(), Date.now()).run();
+  return json({ image_url: imageUrl, source_page_url: finalPage.toString() });
 }
 
 async function reserveRentCastRequest(db: D1Database) {
@@ -418,10 +479,11 @@ const worker = {
         if (!username) return json({ error: "Please log in again." }, 401);
         return aiHealth(env);
       }
-      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/sync") {
+      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
+        if (url.pathname === "/api/property-photo" && request.method === "POST") return findPropertyPhoto(request, env, username);
         if (url.pathname === "/api/properties/sync" && request.method === "POST") {
           ctx.waitUntil(syncPropertyListings(env));
           return json({ ok: true, message: "The weekly property scan has started." }, 202);
