@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import HqMenu from "../HqMenu";
 
 type Mode = "primary" | "income";
 type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string; latitude?: number; longitude?: number };
@@ -51,7 +52,7 @@ export default function PropertiesPage() {
     <main className="properties-page">
       <header className="properties-header">
         <Link href="/portal">← Pauli HQ</Link>
-        <button onClick={() => setShowSearch((value) => !value)}>+ Add region</button>
+        <div className="properties-nav"><button onClick={() => setShowSearch((value) => !value)}>+ Add region</button><HqMenu current="/properties" /></div>
       </header>
       <section className="properties-hero">
         <p className="kicker">AI Property Finder</p>

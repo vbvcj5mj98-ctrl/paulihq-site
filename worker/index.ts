@@ -104,7 +104,7 @@ function safeOpenAIError(status: number, payload: { error?: { code?: string; typ
 
 async function aiHealth(env: Env) {
   if (!env.OPENAI_API_KEY) return json({ configured: false, accessible: false, error: "OPENAI_API_KEY is missing." }, 503);
-  const model = env.OPENAI_MODEL || "gpt-5.6-terra";
+  const model = env.OPENAI_MODEL || "gpt-5.4-mini";
   const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` } });
   const payload = await response.json() as { error?: { code?: string; type?: string; message?: string } };
   if (!response.ok) return json({ configured: true, accessible: false, model, error: safeOpenAIError(response.status, payload) }, 502);
@@ -126,7 +126,7 @@ async function chat(request: Request, env: Env, username: string) {
   const [historyResult, workspaceResult, listResult] = await Promise.all([
     env.DB.prepare("SELECT role, content FROM chat_messages WHERE username = ? ORDER BY id DESC LIMIT 24").bind(username).all<{ role: "user" | "assistant"; content: string }>(),
     env.DB.prepare("SELECT section, title, content, owner, visibility, updated_at FROM workspace_items WHERE owner = ? OR visibility = 'shared' ORDER BY updated_at DESC LIMIT 80").bind(username).all<{ section: string; title: string; content: string; owner: string; visibility: string; updated_at: number }>(),
-    env.DB.prepare("SELECT kind, text, completed FROM list_items WHERE owner = ? OR visibility = 'shared' ORDER BY created_at DESC LIMIT 100").bind(username).all<{ kind: string; text: string; completed: number }>(),
+    env.DB.prepare("SELECT kind, text, completed FROM list_items ORDER BY created_at DESC LIMIT 100").all<{ kind: string; text: string; completed: number }>(),
   ]);
   const history = (historyResult.results ?? []).reverse();
   const workspace = workspaceResult.results ?? [];
@@ -138,7 +138,7 @@ async function chat(request: Request, env: Env, username: string) {
     : "No project or grocery list items are saved yet.";
 
   const requestBody = {
-    model: env.OPENAI_MODEL || "gpt-5.6-terra",
+    model: env.OPENAI_MODEL || "gpt-5.4-mini",
     instructions: `You are the private Pauli HQ assistant for ${username}. Be practical, clear, and concise. You may answer general questions. You are also given authorized Pauli HQ workspace context from Projects, Documents, Property, Calendar, Tasks, Ideas, and Lists. Never claim you changed site data unless a tool explicitly confirms it. Distinguish saved workspace facts from general knowledge.\n\nAUTHORIZED WORKSPACE CONTEXT:\n${workspaceContext}\n\nAUTHORIZED LIST CONTEXT:\n${listContext}`,
     input: [...history, { role: "user", content: message }],
   };
@@ -174,7 +174,7 @@ async function listItems(request: Request, env: Env, username: string) {
   const url = new URL(request.url);
   const kind = url.searchParams.get("kind") === "grocery" ? "grocery" : "project";
   if (request.method === "GET") {
-    const result = await env.DB.prepare("SELECT id, owner, text, completed, created_at FROM list_items WHERE kind = ? AND (owner = ? OR visibility = 'shared') ORDER BY completed ASC, created_at DESC").bind(kind, username).all();
+    const result = await env.DB.prepare("SELECT id, owner, text, completed, created_at FROM list_items WHERE kind = ? ORDER BY completed ASC, created_at DESC").bind(kind).all();
     return json({ items: result.results ?? [] });
   }
   if (request.method === "POST") {
@@ -182,7 +182,7 @@ async function listItems(request: Request, env: Env, username: string) {
     const itemKind = body.kind === "grocery" ? "grocery" : "project";
     const itemText = String(body.text ?? "").trim().slice(0, 500);
     if (!itemText) return json({ error: "Add an item first." }, 400);
-    await env.DB.prepare("INSERT INTO list_items (owner, kind, visibility, text, completed, created_at) VALUES (?, ?, 'shared', ?, 0, ?)").bind(username, itemKind, itemText, Date.now()).run();
+    await env.DB.prepare("INSERT INTO list_items (owner, kind, text, completed, created_at) VALUES (?, ?, ?, 0, ?)").bind(username, itemKind, itemText, Date.now()).run();
     return json({ ok: true }, 201);
   }
   return json({ error: "Method not allowed." }, 405);
@@ -191,8 +191,8 @@ async function listItems(request: Request, env: Env, username: string) {
 async function updateListItem(request: Request, env: Env, username: string, id: number) {
   if (request.method !== "PATCH") return json({ error: "Method not allowed." }, 405);
   const body = await request.json<{ completed?: boolean }>();
-  await env.DB.prepare("UPDATE list_items SET completed = ?, completed_at = ? WHERE id = ? AND (owner = ? OR visibility = 'shared')")
-    .bind(body.completed ? 1 : 0, body.completed ? Date.now() : null, id, username).run();
+  await env.DB.prepare("UPDATE list_items SET completed = ?, completed_at = ? WHERE id = ?")
+    .bind(body.completed ? 1 : 0, body.completed ? Date.now() : null, id).run();
   return json({ ok: true });
 }
 
@@ -206,7 +206,7 @@ async function simplifyList(request: Request, env: Env, username: string) {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-5.6-terra",
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
       instructions: kind === "grocery"
         ? "Convert the request into a concise grocery shopping list. Return one item per line, no bullets, headings, quantities you cannot infer, or commentary."
         : "Convert the request into a simple ordered action list. Each item must be a short, concrete, checkable task. Return one task per line, no bullets, headings, or commentary.",
@@ -218,7 +218,7 @@ async function simplifyList(request: Request, env: Env, username: string) {
   const items = responseText(payload).split("\n").map((line) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 30);
   if (!items.length) return json({ error: "The AI did not return any list items." }, 502);
   const now = Date.now();
-  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, kind, visibility, text, completed, created_at) VALUES (?, ?, 'shared', ?, 0, ?)").bind(username, kind, item.slice(0, 500), now + index)));
+  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, kind, text, completed, created_at) VALUES (?, ?, ?, 0, ?)").bind(username, kind, item.slice(0, 500), now + index)));
   return json({ items });
 }
 
@@ -266,7 +266,7 @@ async function rankNorthwestArkansas(env: Env) {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-5.6-terra",
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
       instructions: "Rank Northwest Arkansas multifamily investment listings. Favor price efficiency, usable unit count signals, reasonable size, and value indicated by days on market. Do not invent rent, expenses, condition, or cap rate. Return only valid JSON as an array with up to 50 objects: source_id (string), score (integer 0-100), summary (one short factual sentence explaining the score and uncertainty).",
       input: JSON.stringify(candidates),
     }),

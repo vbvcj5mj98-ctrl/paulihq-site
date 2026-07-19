@@ -19,8 +19,9 @@ export default function PortalPage() {
       </header>
 
       <section className="hq-grid" aria-label="Pauli HQ spaces">
-        {spaces.map((space) => (
+        {spaces.map((space, index) => (
           <Link className="hq-card" href={space.href} key={space.title}>
+            <small>{String(index + 1).padStart(2, "0")}</small>
             <h2>{space.title}</h2>
             <span aria-hidden="true">→</span>
           </Link>

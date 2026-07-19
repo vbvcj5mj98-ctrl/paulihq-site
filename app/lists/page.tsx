@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import HqMenu from "../HqMenu";
 
 type Kind = "project" | "grocery";
 type Item = { id: number; owner: string; text: string; completed: number; created_at: number };
@@ -64,7 +65,7 @@ export default function ListsPage() {
 
   return (
     <main className="lists-page">
-      <header className="properties-header"><Link href="/portal">← Pauli HQ</Link><span>Shared with Carson &amp; Jessica</span></header>
+      <header className="properties-header"><Link href="/portal">← Pauli HQ</Link><HqMenu current="/lists" /></header>
       <section className="lists-shell">
         <div className="lists-heading"><p className="kicker">AI-powered lists</p><h1>{kind === "project" ? "Turn plans into progress." : "Make shopping simple."}</h1></div>
         <nav className="property-tabs"><button className={kind === "project" ? "active" : ""} onClick={() => setKind("project")}>Projects</button><button className={kind === "grocery" ? "active" : ""} onClick={() => setKind("grocery")}>Grocery list</button></nav>

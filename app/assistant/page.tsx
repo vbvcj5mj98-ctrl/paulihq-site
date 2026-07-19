@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useRef, useState } from "react";
+import HqMenu from "../HqMenu";
 
 type Message = { role: "user" | "assistant"; content: string; created_at?: number };
 
@@ -54,7 +55,7 @@ export default function AssistantPage() {
     <main className="assistant-page">
       <header className="assistant-header">
         <Link href="/portal" className="assistant-back">← Pauli HQ</Link>
-        <div className="assistant-state"><span /> Private assistant</div>
+        <HqMenu current="/assistant" />
       </header>
 
       <section className="chat-shell">
