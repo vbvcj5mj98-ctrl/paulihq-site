@@ -285,6 +285,7 @@ async function propertyListings(request: Request, env: Env, username: string) {
   const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id
     WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
+      AND (l.property_type IS NULL OR (lower(l.property_type) NOT LIKE '%mobile%' AND lower(l.property_type) NOT LIKE '%manufactured%'))
     ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode, searchId, searchId).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
@@ -304,7 +305,7 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
-      instructions: `Convert a user's US real-estate request into filters for a property listing API. Return only valid JSON with: label (short string), location (a complete street address, ZIP code, or \"City, ST\"), radius (integer miles 1-100), property_types (array containing only Single Family, Condo, Townhouse, Manufactured, Multi-Family, Apartment, or Land), min_price, max_price, min_bedrooms, and min_bathrooms (numbers or null). Do not invent a location or constraint. If this is an income search and no property type is stated, use [\"Multi-Family\",\"Apartment\"]. If this is a primary-residence search and no type is stated, leave property_types empty.`,
+      instructions: `Convert a user's US real-estate request into filters for a property listing API. Return only valid JSON with: label (short string), location (a complete street address, ZIP code, or \"City, ST\"), radius (integer miles 1-100), property_types (array containing only Single Family, Condo, Townhouse, Multi-Family, Apartment, or Land), min_price, max_price, min_bedrooms, and min_bathrooms (numbers or null). Never include mobile homes or manufactured homes, even if the user requests them. Do not invent a location or constraint. If this is an income search and no property type is stated, use [\"Multi-Family\",\"Apartment\"]. If this is a primary-residence search and no type is stated, leave property_types empty.`,
       input: `${mode === "income" ? "Income property" : "Primary residence"} request: ${prompt}`,
     }),
   });
@@ -318,7 +319,7 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   if (!location) return json({ error: "Please include a city, state, ZIP code, or property address." }, 400);
   if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The 50-request monthly property-data limit has been reached." }, 429);
 
-  const allowedTypes = new Set(["Single Family", "Condo", "Townhouse", "Manufactured", "Multi-Family", "Apartment", "Land"]);
+  const allowedTypes = new Set(["Single Family", "Condo", "Townhouse", "Multi-Family", "Apartment", "Land"]);
   const propertyTypes = (filters.property_types ?? []).filter((type) => allowedTypes.has(type));
   const params = new URLSearchParams({ address: location, radius: String(Math.max(1, Math.min(100, Math.round(Number(filters.radius) || 20)))), status: "Active", limit: "100" });
   if (propertyTypes.length) params.set("propertyType", propertyTypes.join("|"));
@@ -337,6 +338,8 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   for (const item of feedListings.slice(0, 100)) {
     const hoa = item.hoa && typeof item.hoa === "object" ? Number((item.hoa as { fee?: unknown }).fee ?? 0) : 0;
     if (mode === "income" && hoa > 0) continue;
+    const propertyType = String(item.propertyType ?? "").toLowerCase();
+    if (propertyType.includes("mobile") || propertyType.includes("manufactured")) continue;
     const sourceId = String(item.id ?? "");
     const address = String(item.formattedAddress ?? "");
     if (!sourceId || !address) continue;
@@ -451,7 +454,7 @@ async function reserveRentCastRequest(db: D1Database) {
 
 async function rankNorthwestArkansas(env: Env) {
   if (!env.OPENAI_API_KEY) return;
-  const result = await env.DB.prepare("SELECT source_id, address, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = -100 AND status = 'Active' AND price <= 600000 ORDER BY last_seen_at DESC LIMIT 120").all<Record<string, unknown>>();
+  const result = await env.DB.prepare("SELECT source_id, address, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = -100 AND status = 'Active' AND price <= 600000 AND (property_type IS NULL OR (lower(property_type) NOT LIKE '%mobile%' AND lower(property_type) NOT LIKE '%manufactured%')) ORDER BY last_seen_at DESC LIMIT 120").all<Record<string, unknown>>();
   const candidates = result.results ?? [];
   if (!candidates.length) return;
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -516,6 +519,8 @@ async function syncPropertyListings(env: Env, force = false) {
     for (const item of listings.slice(0, search.id === -100 ? 500 : 100)) {
       const hoa = item.hoa && typeof item.hoa === "object" ? Number((item.hoa as { fee?: unknown }).fee ?? 0) : 0;
       if (search.mode === "income" && hoa > 0) continue;
+      const propertyType = String(item.propertyType ?? "").toLowerCase();
+      if (propertyType.includes("mobile") || propertyType.includes("manufactured")) continue;
       const sourceId = String(item.id ?? "");
       const address = String(item.formattedAddress ?? "");
       if (!sourceId || !address) continue;
@@ -531,6 +536,7 @@ async function syncPropertyListings(env: Env, force = false) {
     await env.DB.prepare("UPDATE property_searches SET last_synced_at = ? WHERE id = ?").bind(now, search.id).run();
   }
   await env.DB.prepare("DELETE FROM property_listings WHERE mode = 'income' AND COALESCE(json_extract(raw_json, '$.hoa.fee'), 0) > 0").run();
+  await env.DB.prepare("DELETE FROM property_listings WHERE lower(COALESCE(property_type, '')) LIKE '%mobile%' OR lower(COALESCE(property_type, '')) LIKE '%manufactured%'").run();
   await rankNorthwestArkansas(env);
 }
 
