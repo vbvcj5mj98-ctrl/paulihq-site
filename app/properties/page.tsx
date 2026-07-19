@@ -28,22 +28,21 @@ export default function PropertiesPage() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [searches, setSearches] = useState<Search[]>([]);
   const [sourceConnected, setSourceConnected] = useState(false);
-  const [selected, setSelected] = useState<Listing | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [showSearch, setShowSearch] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [querying, setQuerying] = useState(false);
   const attemptedPhotos = useRef(new Set<string>());
   const automaticPhotoCount = useRef(0);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    const [listingResponse, searchResponse] = await Promise.all([fetch(`/api/properties?mode=${mode}`), fetch("/api/property-searches")]);
+  const load = useCallback(async (searchId?: number) => {
+    const [listingResponse, searchResponse] = await Promise.all([fetch(`/api/properties?mode=${mode}${searchId ? `&searchId=${searchId}` : ""}`), fetch("/api/property-searches")]);
     if (listingResponse.status === 401) return window.location.assign("/login");
     const listingData = await listingResponse.json() as { listings?: Listing[]; sourceConnected?: boolean; usage?: Usage; error?: string };
     const searchData = await searchResponse.json() as { searches?: Search[] };
     if (!listingResponse.ok) throw new Error(listingData.error || "Unable to load properties.");
     setListings(listingData.listings ?? []);
-    setSelected((current) => current ?? listingData.listings?.find((listing) => listing.latitude != null && listing.longitude != null) ?? null);
     setSourceConnected(Boolean(listingData.sourceConnected));
     if (listingData.usage) setUsage(listingData.usage);
     setSearches(searchData.searches ?? []);
@@ -93,13 +92,19 @@ export default function PropertiesPage() {
         <button className={mode === "primary" ? "active" : ""} onClick={() => setMode("primary")}>Primary residences</button>
       </nav>
 
-      <form className="property-ai-search" onSubmit={(event) => {
+      <form className="property-ai-search" onSubmit={async (event) => {
         event.preventDefault();
         const prompt = String(new FormData(event.currentTarget).get("prompt") ?? "").trim();
-        if (prompt) window.location.assign(`/assistant?prompt=${encodeURIComponent(`Property Finder request: ${prompt}. Search current information and help me evaluate the result as a ${mode === "income" ? "real-estate investment" : "primary residence"}.`)}`);
+        if (!prompt) return;
+        setQuerying(true); setError("");
+        const response = await fetch("/api/properties/query", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt, mode }) });
+        const result = await response.json() as { searchId?: number; count?: number; error?: string };
+        if (!response.ok || !result.searchId) setError(result.error || "Unable to search properties.");
+        else { await load(result.searchId); if (!result.count) setError("The search completed, but no matching active listings were found. Try a wider area or fewer filters."); }
+        setQuerying(false);
       }}>
         <input name="prompt" placeholder="Ask about a specific home, address, city, ZIP code, or area..." required />
-        <button type="submit">Ask AI</button>
+        <button type="submit" disabled={querying}>{querying ? "Searching…" : "Find properties"}</button>
       </form>
 
       {showSearch && (
@@ -120,12 +125,6 @@ export default function PropertiesPage() {
         <div className="property-feed-state"><small>{sourceConnected ? `Weekly feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>{sourceConnected && <button disabled={syncing} onClick={async () => { setSyncing(true); setError(""); const response = await fetch("/api/properties/sync", { method: "POST" }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "Unable to start the scan."); window.setTimeout(() => { setSyncing(false); load().catch(() => undefined); }, 5000); }}>{syncing ? "Scanning…" : "Scan now"}</button>}</div>
       </section>
       {error && <p className="property-error" role="alert">{error}</p>}
-      {selected?.latitude != null && selected.longitude != null && (
-        <section className="property-map">
-          <iframe title={`Map showing ${selected.address}`} loading="lazy" referrerPolicy="no-referrer" src={`https://www.openstreetmap.org/export/embed.html?bbox=${selected.longitude - .04}%2C${selected.latitude - .025}%2C${selected.longitude + .04}%2C${selected.latitude + .025}&layer=mapnik&marker=${selected.latitude}%2C${selected.longitude}`} />
-          <div><strong>{selected.address}</strong><span>{selected.ai_score ? `AI score ${selected.ai_score}/100` : "Selected property"}</span><a href={`https://www.openstreetmap.org/?mlat=${selected.latitude}&mlon=${selected.longitude}#map=14/${selected.latitude}/${selected.longitude}`} target="_blank" rel="noreferrer">Open larger map ↗</a></div>
-        </section>
-      )}
       {listings.length ? (
         <section className="property-grid">
           {listings.map((listing) => (
@@ -137,7 +136,7 @@ export default function PropertiesPage() {
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
-              {listing.latitude != null && listing.longitude != null && <button className="map-button" onClick={() => { setSelected(listing); window.scrollTo({ top: 420, behavior: "smooth" }); }}>View on map</button>}
+              <a className="map-link" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([listing.address, listing.city, listing.state, listing.zip_code].filter(Boolean).join(", "))}`} target="_blank" rel="noreferrer">View map ↗</a>
               <a className="listing-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">View listing ↗</a>
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>
