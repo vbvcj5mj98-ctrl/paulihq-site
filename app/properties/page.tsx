@@ -6,23 +6,26 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 type Mode = "primary" | "income";
 type Listing = { source_id: string; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string };
 type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
+type Usage = { requests: number; limit: number; period: string };
 
 export default function PropertiesPage() {
   const [mode, setMode] = useState<Mode>("primary");
   const [listings, setListings] = useState<Listing[]>([]);
   const [searches, setSearches] = useState<Search[]>([]);
   const [sourceConnected, setSourceConnected] = useState(false);
+  const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [showSearch, setShowSearch] = useState(false);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     const [listingResponse, searchResponse] = await Promise.all([fetch(`/api/properties?mode=${mode}`), fetch("/api/property-searches")]);
     if (listingResponse.status === 401) return window.location.assign("/login");
-    const listingData = await listingResponse.json() as { listings?: Listing[]; sourceConnected?: boolean; error?: string };
+    const listingData = await listingResponse.json() as { listings?: Listing[]; sourceConnected?: boolean; usage?: Usage; error?: string };
     const searchData = await searchResponse.json() as { searches?: Search[] };
     if (!listingResponse.ok) throw new Error(listingData.error || "Unable to load properties.");
     setListings(listingData.listings ?? []);
     setSourceConnected(Boolean(listingData.sourceConnected));
+    if (listingData.usage) setUsage(listingData.usage);
     setSearches(searchData.searches ?? []);
   }, [mode]);
 
@@ -72,7 +75,7 @@ export default function PropertiesPage() {
 
       <section className="property-toolbar">
         <div>{activeSearches.map((search) => <span key={search.id}>{search.label}</span>)}</div>
-        <small>{sourceConnected ? "Listing feed connected · refreshes twice daily" : "Listing feed needs connection"}</small>
+        <small>{sourceConnected ? `Listing feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>
       </section>
       {error && <p className="property-error" role="alert">{error}</p>}
       {listings.length ? (

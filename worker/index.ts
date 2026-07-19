@@ -17,6 +17,7 @@ interface ScheduledController { scheduledTime: number; cron: string; noRetry(): 
 const encoder = new TextEncoder();
 const approvedUsers = new Set(["carsonpauli", "jessipauli"]);
 const passwordHashIterations = 30_000;
+const monthlyRentCastRequestLimit = 50;
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -63,6 +64,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS property_listings_mode_seen_idx ON property_listings (mode, last_seen_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS list_items (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('project', 'grocery')), visibility TEXT NOT NULL DEFAULT 'shared' CHECK(visibility IN ('private', 'shared')), text TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, completed_at INTEGER)"),
     db.prepare("CREATE INDEX IF NOT EXISTS list_items_owner_kind_idx ON list_items (owner, kind, completed, created_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS api_usage (service TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (service, period))"),
   ]);
 }
 
@@ -211,7 +213,17 @@ async function propertyListings(request: Request, env: Env, username: string) {
   const mode = new URL(request.url).searchParams.get("mode") === "income" ? "income" : "primary";
   const result = await env.DB.prepare(`SELECT l.source_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id WHERE s.owner = ? AND l.mode = ? ORDER BY l.last_seen_at DESC, l.price ASC LIMIT 250`).bind(username, mode).all();
-  return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY) });
+  const period = new Date().toISOString().slice(0, 7);
+  const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
+  return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
+}
+
+async function reserveRentCastRequest(db: D1Database) {
+  const period = new Date().toISOString().slice(0, 7);
+  await db.prepare("INSERT OR IGNORE INTO api_usage (service, period, requests, updated_at) VALUES ('rentcast', ?, 0, ?)").bind(period, Date.now()).run();
+  const reservation = await db.prepare("UPDATE api_usage SET requests = requests + 1, updated_at = ? WHERE service = 'rentcast' AND period = ? AND requests < ?")
+    .bind(Date.now(), period, monthlyRentCastRequestLimit).run();
+  return Number(reservation.meta.changes ?? 0) === 1;
 }
 
 async function syncPropertyListings(env: Env) {
@@ -219,6 +231,11 @@ async function syncPropertyListings(env: Env) {
   await ensureSchema(env.DB);
   const searchResult = await env.DB.prepare("SELECT id, mode, city, state, zip_code, min_price, max_price FROM property_searches WHERE active = 1").all<{ id: number; mode: string; city: string | null; state: string | null; zip_code: string | null; min_price: number | null; max_price: number | null }>();
   for (const search of searchResult.results ?? []) {
+    const reserved = await reserveRentCastRequest(env.DB);
+    if (!reserved) {
+      console.log("RentCast monthly request limit reached; property sync stopped.");
+      break;
+    }
     const params = new URLSearchParams({ limit: "100", status: "Active" });
     if (search.zip_code) params.set("zipCode", search.zip_code);
     else {
