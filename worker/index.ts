@@ -121,11 +121,27 @@ async function logout(request: Request, env: Env) {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/portal")) await ensureSchema(env.DB);
-    if (request.method === "POST" && url.pathname === "/api/setup") return setup(request, env);
-    if (request.method === "POST" && url.pathname === "/api/login") return login(request, env);
-    if (request.method === "POST" && url.pathname === "/api/logout") return logout(request, env);
-    if (url.pathname.startsWith("/portal") && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
+    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/portal")) {
+      if (!env.DB) return json({ error: "The Cloudflare database binding is not connected." }, 503);
+      try {
+        await ensureSchema(env.DB);
+      } catch (error) {
+        console.error("D1 schema initialization failed", error);
+        return json({ error: "The authentication database is connected but unavailable." }, 503);
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/api/status") {
+      return json({ database: true, setupCode: Boolean(env.SETUP_CODE), schema: true });
+    }
+    try {
+      if (request.method === "POST" && url.pathname === "/api/setup") return setup(request, env);
+      if (request.method === "POST" && url.pathname === "/api/login") return login(request, env);
+      if (request.method === "POST" && url.pathname === "/api/logout") return logout(request, env);
+      if (url.pathname.startsWith("/portal") && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
+    } catch (error) {
+      console.error("Authentication request failed", error);
+      return json({ error: "The authentication service encountered an error." }, 500);
+    }
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
