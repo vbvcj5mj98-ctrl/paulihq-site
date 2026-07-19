@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import HqHomeLink from "../HqHomeLink";
 import HqMenu from "../HqMenu";
 
-type Property = { id: number; owner: string; name: string; address: string; apn?: string; occupancy: "rented" | "primary" | "secondary" | "vacant"; estimated_value: number; money_owed: number; notes?: string; latitude?: number; longitude?: number; shared_with?: string };
+type Property = { id: number; owner: string; name: string; address: string; apn?: string; occupancy: "rented" | "primary" | "secondary" | "vacant"; estimated_value: number; money_owed: number; notes?: string; latitude?: number; longitude?: number; shared_with?: string; assessor_id?: string; assessed_value?: number; land_value?: number; improvement_value?: number; assessment_year?: number; annual_tax?: number; tax_year?: number; legal_description?: string; zoning?: string; last_sale_price?: number; last_sale_date?: string; parcel_refreshed_at?: number };
 type Weather = { temperature_2m?: number; apparent_temperature?: number; weather_code?: number; wind_speed_10m?: number };
 type User = { username: string };
 type AddressSuggestion = { placeId: string; text: string };
@@ -34,6 +34,7 @@ export default function PortfolioPage() {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [addressBusy, setAddressBusy] = useState(false);
   const [valuationNote, setValuationNote] = useState("");
+  const [parcelBusy, setParcelBusy] = useState<number | null>(null);
   const sessionToken = useRef(crypto.randomUUID());
   const suppressSuggestions = useRef(false);
   const load = useCallback(async () => {
@@ -106,6 +107,15 @@ export default function PortfolioPage() {
     await load();
   }
 
+  async function loadParcel(property: Property) {
+    setParcelBusy(property.id); setError("");
+    const response = await fetch("/api/portfolio-parcel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: property.id }) });
+    const result = await response.json() as { error?: string };
+    if (!response.ok) setError(result.error || "Unable to retrieve the parcel record.");
+    else await load();
+    setParcelBusy(null);
+  }
+
   const totalValue = properties.reduce((total, property) => total + Number(property.estimated_value || 0), 0);
   const totalOwed = properties.reduce((total, property) => total + Number(property.money_owed || 0), 0);
   return <main className="properties-page">
@@ -130,6 +140,7 @@ export default function PortfolioPage() {
           <div className="portfolio-card-top"><span>{property.occupancy}</span><small>{property.owner === username ? "Owned by you" : `Shared by ${property.owner}`}</small></div>
           <h2>{property.name}</h2>{property.address ? <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(property.address)}`} target="_blank" rel="noreferrer">{property.address} ↗</a> : <p className="portfolio-apn">APN {property.apn}</p>}
           <div className="portfolio-finances"><div><small>Estimated value</small><strong>{money.format(property.estimated_value || 0)}</strong></div><div><small>Money owed</small><strong>{money.format(property.money_owed || 0)}</strong></div><div><small>Net equity</small><strong>{money.format((property.estimated_value || 0) - (property.money_owed || 0))}</strong></div></div>
+          {property.assessor_id || property.assessed_value ? <div className="portfolio-parcel"><div className="portfolio-parcel-title"><small>County parcel record</small><button onClick={() => loadParcel(property)} disabled={parcelBusy === property.id}>{parcelBusy === property.id ? "Refreshing…" : "Refresh"}</button></div><dl><div><dt>APN</dt><dd>{property.assessor_id || property.apn || "—"}</dd></div><div><dt>Assessed value{property.assessment_year ? ` (${property.assessment_year})` : ""}</dt><dd>{property.assessed_value ? money.format(property.assessed_value) : "—"}</dd></div><div><dt>Land</dt><dd>{property.land_value ? money.format(property.land_value) : "—"}</dd></div><div><dt>Improvements</dt><dd>{property.improvement_value ? money.format(property.improvement_value) : "—"}</dd></div><div><dt>Property tax{property.tax_year ? ` (${property.tax_year})` : ""}</dt><dd>{property.annual_tax ? money.format(property.annual_tax) : "—"}</dd></div><div><dt>Zoning</dt><dd>{property.zoning || "—"}</dd></div></dl>{property.legal_description && <p>{property.legal_description}</p>}{property.last_sale_price ? <span>Last recorded sale: {money.format(property.last_sale_price)}{property.last_sale_date ? ` · ${new Date(property.last_sale_date).toLocaleDateString()}` : ""}</span> : null}</div> : <div className="portfolio-parcel-empty"><span>{property.address ? "APN and assessed value are available from county records." : "Add a street address to retrieve parcel records."}</span>{property.address && <button onClick={() => loadParcel(property)} disabled={parcelBusy === property.id}>{parcelBusy === property.id ? "Loading parcel record…" : "Load parcel record"}</button>}</div>}
           {property.address && <WeatherPanel property={property} />}
           {property.notes && <div className="portfolio-notes"><small>Notes</small><p>{property.notes}</p></div>}
           {property.shared_with && <p className="portfolio-shared">Shared with {property.shared_with.split(",").join(", ")}</p>}

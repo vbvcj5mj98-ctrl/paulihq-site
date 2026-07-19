@@ -66,7 +66,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS list_items (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('project', 'grocery')), visibility TEXT NOT NULL DEFAULT 'shared' CHECK(visibility IN ('private', 'shared')), text TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, completed_at INTEGER)"),
     db.prepare("CREATE INDEX IF NOT EXISTS list_items_owner_kind_idx ON list_items (owner, kind, completed, created_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS api_usage (service TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (service, period))"),
-    db.prepare("CREATE TABLE IF NOT EXISTS property_ai_rankings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, score INTEGER NOT NULL, summary TEXT NOT NULL, ranked_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_ai_rankings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, score INTEGER NOT NULL, summary TEXT NOT NULL, estimated_monthly_income INTEGER, estimated_roi REAL, ranked_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_coordinates (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_preferences (username TEXT PRIMARY KEY, property_refresh TEXT NOT NULL DEFAULT 'weekly' CHECK(property_refresh IN ('weekly', 'daily', 'twice_daily')), updated_at INTEGER NOT NULL)"),
@@ -80,6 +80,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS portfolio_members (property_id INTEGER NOT NULL, username TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (property_id, username))"),
     db.prepare("CREATE INDEX IF NOT EXISTS portfolio_members_user_idx ON portfolio_members (username, property_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_valuation_cache (address_key TEXT PRIMARY KEY, formatted_address TEXT NOT NULL, estimated_value INTEGER NOT NULL, range_low INTEGER, range_high INTEGER, latitude REAL, longitude REAL, refreshed_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS portfolio_parcel_data (property_id INTEGER PRIMARY KEY, assessor_id TEXT, assessed_value INTEGER, land_value INTEGER, improvement_value INTEGER, assessment_year INTEGER, annual_tax INTEGER, tax_year INTEGER, legal_description TEXT, zoning TEXT, last_sale_price INTEGER, last_sale_date TEXT, refreshed_at INTEGER NOT NULL)"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -96,6 +97,9 @@ async function ensureSchema(db: D1Database) {
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "apn")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN apn TEXT NOT NULL DEFAULT ''").run();
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "money_owed")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN money_owed INTEGER NOT NULL DEFAULT 0").run();
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "notes")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN notes TEXT NOT NULL DEFAULT ''").run();
+  const rankingColumns = await db.prepare("PRAGMA table_info(property_ai_rankings)").all<{ name: string }>();
+  if (!(rankingColumns.results ?? []).some((column) => column.name === "estimated_monthly_income")) await db.prepare("ALTER TABLE property_ai_rankings ADD COLUMN estimated_monthly_income INTEGER").run();
+  if (!(rankingColumns.results ?? []).some((column) => column.name === "estimated_roi")) await db.prepare("ALTER TABLE property_ai_rankings ADD COLUMN estimated_roi REAL").run();
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
   const permissionTime = Date.now();
   await db.batch(["assistant", "lists", "properties"].map((page) => db.prepare("INSERT OR IGNORE INTO user_page_permissions (username, page_key, allowed, updated_at) VALUES ('jessipauli', ?, 1, ?)").bind(page, permissionTime)));
@@ -297,14 +301,26 @@ async function propertyListings(request: Request, env: Env, username: string) {
   const requestedSearchId = searchIdValue == null ? null : Number(searchIdValue);
   const searchId = requestedSearchId != null && Number.isInteger(requestedSearchId) ? requestedSearchId : null;
   const starredOnly = url.searchParams.get("starred") === "1";
-  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url, CASE WHEN f.username IS NULL THEN 0 ELSE 1 END AS is_favorite
+  const requestedSort = String(url.searchParams.get("sort") ?? (mode === "income" ? "roi" : "ai"));
+  const sortClauses: Record<string, string> = {
+    roi: "COALESCE(r.estimated_roi, r.score / 10.0, 0) DESC, l.price ASC",
+    lot: "(l.lot_size IS NULL), l.lot_size DESC",
+    beds: "(l.bedrooms IS NULL), l.bedrooms DESC",
+    baths: "(l.bathrooms IS NULL), l.bathrooms DESC",
+    sqft: "(l.square_feet IS NULL), l.square_feet DESC",
+    price_low: "(l.price IS NULL), l.price ASC",
+    price_high: "(l.price IS NULL), l.price DESC",
+    ai: "COALESCE(r.score, 0) DESC, l.last_seen_at DESC",
+  };
+  const sort = requestedSort === "roi" && mode !== "income" ? "ai" : requestedSort in sortClauses ? requestedSort : mode === "income" ? "roi" : "ai";
+  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, r.estimated_monthly_income, r.estimated_roi, c.latitude, c.longitude, m.image_url, m.source_page_url, CASE WHEN f.username IS NULL THEN 0 ELSE 1 END AS is_favorite
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id LEFT JOIN property_favorites f ON f.username = ? AND f.source_id = l.source_id AND f.search_id = l.search_id
     WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND (? = 0 OR f.username IS NOT NULL) AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
       AND (l.property_type IS NULL OR (lower(l.property_type) NOT LIKE '%mobile%' AND lower(l.property_type) NOT LIKE '%manufactured%'))
-    ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, username, mode, searchId, searchId, starredOnly ? 1 : 0).all();
+    ORDER BY ${sortClauses[sort]} LIMIT 50`).bind(username, username, mode, searchId, searchId, starredOnly ? 1 : 0).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
-  return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
+  return json({ listings: result.results ?? [], sort, sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
 }
 
 async function propertyFavorite(request: Request, env: Env, username: string) {
@@ -387,10 +403,74 @@ async function portfolioUsers(env: Env) {
   return json({ users: result.results ?? [] });
 }
 
+type ParcelRecord = {
+  assessorID?: string;
+  legalDescription?: string;
+  zoning?: string;
+  lastSalePrice?: number;
+  lastSaleDate?: string;
+  taxAssessments?: Record<string, { value?: number; land?: number; improvements?: number }>;
+  propertyTaxes?: Record<string, { total?: number } | number>;
+};
+
+function latestYearValue<T>(values?: Record<string, T>) {
+  const years = Object.keys(values ?? {}).filter((year) => /^\d{4}$/.test(year)).sort((left, right) => Number(right) - Number(left));
+  const year = years[0];
+  return year ? { year: Number(year), value: values?.[year] } : null;
+}
+
+async function portfolioParcel(request: Request, env: Env, username: string) {
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  if (!env.RENTCAST_API_KEY) return json({ error: "The parcel-data connection is not configured." }, 503);
+  const body = await request.json<{ id?: number }>();
+  const id = Number(body.id);
+  if (!Number.isInteger(id)) return json({ error: "Invalid property." }, 400);
+  const property = await env.DB.prepare(`SELECT p.address FROM portfolio_properties p WHERE p.id = ? AND
+    (p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members m WHERE m.property_id = p.id AND m.username = ?))`).bind(id, username, username).first<{ address: string }>();
+  if (!property) return json({ error: "Property not found." }, 404);
+  if (!property.address) return json({ error: "Add a street address to retrieve county parcel records. APNs need a county-specific lookup source." }, 422);
+
+  const cached = await env.DB.prepare("SELECT * FROM portfolio_parcel_data WHERE property_id = ? AND refreshed_at > ?").bind(id, Date.now() - 30 * 24 * 60 * 60_000).first();
+  if (cached) return json({ parcel: cached, cached: true });
+  if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
+
+  const params = new URLSearchParams({ address: property.address, limit: "1" });
+  const response = await fetch(`https://api.rentcast.io/v1/properties?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const payload = await response.json() as ParcelRecord[] | { message?: string };
+  const record = Array.isArray(payload) ? payload[0] : null;
+  if (!response.ok || !record) return json({ error: "No county parcel record was available for that address." }, 422);
+
+  const assessment = latestYearValue(record.taxAssessments);
+  const taxes = latestYearValue(record.propertyTaxes);
+  const taxValue = taxes?.value;
+  const annualTax = typeof taxValue === "number" ? taxValue : taxValue?.total;
+  const parcel = {
+    property_id: id,
+    assessor_id: String(record.assessorID ?? "").slice(0, 100) || null,
+    assessed_value: Number.isFinite(Number(assessment?.value?.value)) ? Math.round(Number(assessment?.value?.value)) : null,
+    land_value: Number.isFinite(Number(assessment?.value?.land)) ? Math.round(Number(assessment?.value?.land)) : null,
+    improvement_value: Number.isFinite(Number(assessment?.value?.improvements)) ? Math.round(Number(assessment?.value?.improvements)) : null,
+    assessment_year: assessment?.year ?? null,
+    annual_tax: Number.isFinite(Number(annualTax)) ? Math.round(Number(annualTax)) : null,
+    tax_year: taxes?.year ?? null,
+    legal_description: String(record.legalDescription ?? "").slice(0, 1_000) || null,
+    zoning: String(record.zoning ?? "").slice(0, 120) || null,
+    last_sale_price: Number.isFinite(Number(record.lastSalePrice)) ? Math.round(Number(record.lastSalePrice)) : null,
+    last_sale_date: String(record.lastSaleDate ?? "").slice(0, 40) || null,
+    refreshed_at: Date.now(),
+  };
+  await env.DB.prepare(`INSERT INTO portfolio_parcel_data (property_id, assessor_id, assessed_value, land_value, improvement_value, assessment_year, annual_tax, tax_year, legal_description, zoning, last_sale_price, last_sale_date, refreshed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(property_id) DO UPDATE SET assessor_id=excluded.assessor_id, assessed_value=excluded.assessed_value, land_value=excluded.land_value, improvement_value=excluded.improvement_value, assessment_year=excluded.assessment_year, annual_tax=excluded.annual_tax, tax_year=excluded.tax_year, legal_description=excluded.legal_description, zoning=excluded.zoning, last_sale_price=excluded.last_sale_price, last_sale_date=excluded.last_sale_date, refreshed_at=excluded.refreshed_at`)
+    .bind(parcel.property_id, parcel.assessor_id, parcel.assessed_value, parcel.land_value, parcel.improvement_value, parcel.assessment_year, parcel.annual_tax, parcel.tax_year, parcel.legal_description, parcel.zoning, parcel.last_sale_price, parcel.last_sale_date, parcel.refreshed_at).run();
+  if (parcel.assessor_id) await env.DB.prepare("UPDATE portfolio_properties SET apn = CASE WHEN apn = '' THEN ? ELSE apn END WHERE id = ?").bind(parcel.assessor_id, id).run();
+  return json({ parcel, cached: false });
+}
+
 async function portfolio(request: Request, env: Env, username: string) {
   if (request.method === "GET") {
     const result = await env.DB.prepare(`SELECT p.id, p.owner, p.name, p.address, p.apn, p.occupancy, p.estimated_value, p.money_owed, p.notes, p.latitude, p.longitude, p.updated_at,
-      GROUP_CONCAT(m.username) AS shared_with FROM portfolio_properties p LEFT JOIN portfolio_members m ON m.property_id = p.id
+      d.assessor_id, d.assessed_value, d.land_value, d.improvement_value, d.assessment_year, d.annual_tax, d.tax_year, d.legal_description, d.zoning, d.last_sale_price, d.last_sale_date, d.refreshed_at AS parcel_refreshed_at,
+      GROUP_CONCAT(m.username) AS shared_with FROM portfolio_properties p LEFT JOIN portfolio_members m ON m.property_id = p.id LEFT JOIN portfolio_parcel_data d ON d.property_id = p.id
       WHERE p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members mine WHERE mine.property_id = p.id AND mine.username = ?)
       GROUP BY p.id ORDER BY p.updated_at DESC`).bind(username, username).all();
     return json({ properties: result.results ?? [] });
@@ -422,7 +502,7 @@ async function portfolio(request: Request, env: Env, username: string) {
   const owned = await env.DB.prepare("SELECT address FROM portfolio_properties WHERE id = ? AND owner = ?").bind(id, username).first<{ address: string }>();
   if (!owned) return json({ error: "Only the property owner can make this change." }, 403);
   if (request.method === "DELETE") {
-    await env.DB.batch([env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id), env.DB.prepare("DELETE FROM portfolio_properties WHERE id = ? AND owner = ?").bind(id, username)]);
+    await env.DB.batch([env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id), env.DB.prepare("DELETE FROM portfolio_parcel_data WHERE property_id = ?").bind(id), env.DB.prepare("DELETE FROM portfolio_properties WHERE id = ? AND owner = ?").bind(id, username)]);
     return json({ ok: true });
   }
   if (request.method === "PATCH") {
@@ -525,6 +605,7 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
     if (Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude))) await env.DB.prepare("INSERT INTO property_coordinates (source_id, search_id, latitude, longitude) VALUES (?, ?, ?, ?)").bind(sourceId, searchId, Number(item.latitude), Number(item.longitude)).run();
     saved++;
   }
+  if (mode === "income" && saved > 0) await rankIncomeSearch(env, searchId);
   return json({ ok: true, searchId, count: saved, label });
 }
 
@@ -637,9 +718,9 @@ async function reserveUserPropertyRequest(db: D1Database, username: string) {
   return { ok: Number(reservation.meta.changes ?? 0) === 1, limit, period };
 }
 
-async function rankNorthwestArkansas(env: Env) {
+async function rankIncomeSearch(env: Env, searchId: number) {
   if (!env.OPENAI_API_KEY) return;
-  const result = await env.DB.prepare("SELECT source_id, address, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = -100 AND status = 'Active' AND price <= 600000 AND (property_type IS NULL OR (lower(property_type) NOT LIKE '%mobile%' AND lower(property_type) NOT LIKE '%manufactured%')) ORDER BY last_seen_at DESC LIMIT 120").all<Record<string, unknown>>();
+  const result = await env.DB.prepare("SELECT source_id, address, city, state, zip_code, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = ? AND mode = 'income' AND status = 'Active' AND (property_type IS NULL OR (lower(property_type) NOT LIKE '%mobile%' AND lower(property_type) NOT LIKE '%manufactured%')) ORDER BY last_seen_at DESC LIMIT 120").bind(searchId).all<Record<string, unknown>>();
   const candidates = result.results ?? [];
   if (!candidates.length) return;
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -647,7 +728,7 @@ async function rankNorthwestArkansas(env: Env) {
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
-      instructions: "Rank Northwest Arkansas multifamily investment listings. Favor price efficiency, usable unit count signals, reasonable size, and value indicated by days on market. Do not invent rent, expenses, condition, or cap rate. Return only valid JSON as an array with up to 50 objects: source_id (string), score (integer 0-100), summary (one short factual sentence explaining the score and uncertainty).",
+      instructions: "Lightly screen these US income-property listings for investment potential. Use only the supplied location, property type, price, bedrooms, bathrooms, square footage, lot size, and days on market. Provide a conservative estimated_monthly_income for comparison using broad market assumptions; it is a screening estimate, not verified rent. Calculate estimated_roi as estimated annual gross income divided by purchase price times 100. Favor price efficiency, useful size, and likely income potential. Never claim known tenants, occupancy, expenses, condition, exact unit count, cap rate, or verified rent. Return only valid JSON as an array with up to 50 objects: source_id (string), score (integer 0-100), estimated_monthly_income (positive integer), estimated_roi (number), summary (one short sentence that explains the ranking and says the income is estimated).",
       input: JSON.stringify(candidates),
     }),
   });
@@ -658,15 +739,33 @@ async function rankNorthwestArkansas(env: Env) {
   const payload = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
   try {
     const cleaned = responseText(payload).replace(/^```json\s*/i, "").replace(/```\s*$/, "");
-    const rankings = JSON.parse(cleaned) as Array<{ source_id?: string; score?: number; summary?: string }>;
-    const valid = rankings.filter((item) => item.source_id && Number.isFinite(item.score)).slice(0, 50);
+    const rankings = JSON.parse(cleaned) as Array<{ source_id?: string; score?: number; estimated_monthly_income?: number; estimated_roi?: number; summary?: string }>;
+    const valid = rankings.filter((item) => item.source_id && Number.isFinite(item.score) && Number.isFinite(item.estimated_monthly_income)).slice(0, 50);
     if (!valid.length) return;
     const now = Date.now();
-    await env.DB.batch(valid.map((item) => env.DB.prepare("INSERT INTO property_ai_rankings (source_id, search_id, score, summary, ranked_at) VALUES (?, -100, ?, ?, ?) ON CONFLICT(source_id, search_id) DO UPDATE SET score=excluded.score, summary=excluded.summary, ranked_at=excluded.ranked_at")
-      .bind(item.source_id, Math.max(0, Math.min(100, Math.round(item.score ?? 0))), String(item.summary ?? "AI-ranked candidate.").slice(0, 400), now)));
+    await env.DB.batch(valid.map((item) => {
+      const listing = candidates.find((candidate) => candidate.source_id === item.source_id);
+      const income = Math.max(0, Math.round(Number(item.estimated_monthly_income) || 0));
+      const calculatedRoi = Number(listing?.price) > 0 ? income * 12 / Number(listing?.price) * 100 : 0;
+      const roi = Number.isFinite(Number(item.estimated_roi)) ? Number(item.estimated_roi) : calculatedRoi;
+      return env.DB.prepare("INSERT INTO property_ai_rankings (source_id, search_id, score, summary, estimated_monthly_income, estimated_roi, ranked_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_id, search_id) DO UPDATE SET score=excluded.score, summary=excluded.summary, estimated_monthly_income=excluded.estimated_monthly_income, estimated_roi=excluded.estimated_roi, ranked_at=excluded.ranked_at")
+        .bind(item.source_id, searchId, Math.max(0, Math.min(100, Math.round(item.score ?? 0))), String(item.summary ?? "AI-ranked candidate with an estimated income range.").slice(0, 400), income, Math.max(0, Math.min(100, roi)), now);
+    }));
   } catch (error) {
     console.error("Property AI ranking response was invalid", error);
   }
+}
+
+async function rankPropertySearch(request: Request, env: Env, username: string) {
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  if (!env.OPENAI_API_KEY) return json({ error: "The AI connection is not configured." }, 503);
+  const body = await request.json<{ searchId?: number }>();
+  const searchId = Number(body.searchId);
+  if (!Number.isInteger(searchId)) return json({ error: "Invalid property search." }, 400);
+  const search = await env.DB.prepare("SELECT id FROM property_searches WHERE id = ? AND mode = 'income' AND (owner = ? OR owner = 'shared')").bind(searchId, username).first();
+  if (!search) return json({ error: "Income property search not found." }, 404);
+  await rankIncomeSearch(env, searchId);
+  return json({ ok: true });
 }
 
 async function syncPropertyListings(env: Env, force = false) {
@@ -719,10 +818,10 @@ async function syncPropertyListings(env: Env, force = false) {
       }
     }
     await env.DB.prepare("UPDATE property_searches SET last_synced_at = ? WHERE id = ?").bind(now, search.id).run();
+    if (search.mode === "income") await rankIncomeSearch(env, search.id);
   }
   await env.DB.prepare("DELETE FROM property_listings WHERE mode = 'income' AND COALESCE(json_extract(raw_json, '$.hoa.fee'), 0) > 0").run();
   await env.DB.prepare("DELETE FROM property_listings WHERE lower(COALESCE(property_type, '')) LIKE '%mobile%' OR lower(COALESCE(property_type, '')) LIKE '%manufactured%'").run();
-  await rankNorthwestArkansas(env);
 }
 
 async function setup(request: Request, env: Env) {
@@ -989,6 +1088,11 @@ const worker = {
         if (url.pathname === "/api/portfolio-weather" && request.method === "GET") return portfolioWeather(request, env, username);
         return portfolio(request, env, username);
       }
+      if (url.pathname === "/api/portfolio-parcel") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return portfolioParcel(request, env, username);
+      }
       if (url.pathname === "/api/address-autocomplete" || url.pathname === "/api/address-details" || url.pathname === "/api/portfolio-value") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
@@ -997,7 +1101,7 @@ const worker = {
         if (url.pathname === "/api/address-details") return addressDetails(request, env);
         return portfolioValuation(request, env);
       }
-      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image" || url.pathname === "/api/property-favorites") {
+      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/properties/rank" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image" || url.pathname === "/api/property-favorites") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (!(await pageAccess(env, username, "properties"))) return json({ error: "You do not have access to Property Finder." }, 403);
@@ -1006,6 +1110,7 @@ const worker = {
         if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
         if (url.pathname === "/api/property-favorites") return propertyFavorite(request, env, username);
         if (url.pathname === "/api/properties/query" && request.method === "POST") return aiPropertyQuery(request, env, username);
+        if (url.pathname === "/api/properties/rank") return rankPropertySearch(request, env, username);
         if (url.pathname === "/api/properties/sync" && request.method === "POST") {
           ctx.waitUntil(syncPropertyListings(env, true));
           return json({ ok: true, message: "The weekly property scan has started." }, 202);

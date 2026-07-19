@@ -5,7 +5,8 @@ import HqMenu from "../HqMenu";
 import HqHomeLink from "../HqHomeLink";
 
 type Mode = "primary" | "income";
-type Listing = { source_id: string; search_id: number; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string; latitude?: number; longitude?: number; image_url?: string; source_page_url?: string; is_favorite?: number };
+type Sort = "roi" | "ai" | "lot" | "beds" | "baths" | "sqft" | "price_low" | "price_high";
+type Listing = { source_id: string; search_id: number; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; lot_size?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string; estimated_monthly_income?: number; estimated_roi?: number; latitude?: number; longitude?: number; image_url?: string; source_page_url?: string; is_favorite?: number };
 type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
 type Usage = { requests: number; limit: number; period: string };
 
@@ -26,6 +27,7 @@ function PropertyVisual({ listing }: { listing: Listing }) {
 export default function PropertiesPage() {
   const [mode, setMode] = useState<Mode>("income");
   const [showStarred, setShowStarred] = useState(false);
+  const [sort, setSort] = useState<Sort>("roi");
   const [listings, setListings] = useState<Listing[]>([]);
   const [searches, setSearches] = useState<Search[]>([]);
   const [sourceConnected, setSourceConnected] = useState(false);
@@ -34,11 +36,12 @@ export default function PropertiesPage() {
   const [syncing, setSyncing] = useState(false);
   const [querying, setQuerying] = useState(false);
   const attemptedPhotos = useRef(new Set<string>());
+  const attemptedRankings = useRef(new Set<number>());
   const automaticPhotoCount = useRef(0);
   const [error, setError] = useState("");
 
   const load = useCallback(async (searchId?: number) => {
-    const [listingResponse, searchResponse] = await Promise.all([fetch(`/api/properties?mode=${mode}${searchId ? `&searchId=${searchId}` : ""}${showStarred ? "&starred=1" : ""}`), fetch("/api/property-searches")]);
+    const [listingResponse, searchResponse] = await Promise.all([fetch(`/api/properties?mode=${mode}&sort=${sort}${searchId ? `&searchId=${searchId}` : ""}${showStarred ? "&starred=1" : ""}`), fetch("/api/property-searches")]);
     if (listingResponse.status === 401) return window.location.assign("/login");
     const listingData = await listingResponse.json() as { listings?: Listing[]; sourceConnected?: boolean; usage?: Usage; error?: string };
     const searchData = await searchResponse.json() as { searches?: Search[] };
@@ -47,7 +50,7 @@ export default function PropertiesPage() {
     setSourceConnected(Boolean(listingData.sourceConnected));
     if (listingData.usage) setUsage(listingData.usage);
     setSearches(searchData.searches ?? []);
-  }, [mode, showStarred]);
+  }, [mode, showStarred, sort]);
 
   useEffect(() => { load().catch((reason: Error) => setError(reason.message)); }, [load]);
 
@@ -63,6 +66,14 @@ export default function PropertiesPage() {
       body: JSON.stringify({ sourceId: listing.source_id, searchId: listing.search_id }),
     }))).then(() => load().catch(() => undefined));
   }, [listings, load]);
+
+  useEffect(() => {
+    if (mode !== "income") return;
+    const searchIds = [...new Set(listings.filter((listing) => !listing.estimated_monthly_income && !attemptedRankings.current.has(listing.search_id)).map((listing) => listing.search_id))].slice(0, 3);
+    if (!searchIds.length) return;
+    for (const searchId of searchIds) attemptedRankings.current.add(searchId);
+    Promise.allSettled(searchIds.map((searchId) => fetch("/api/properties/rank", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ searchId }) }))).then(() => load().catch(() => undefined));
+  }, [listings, load, mode]);
 
   async function addSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -105,14 +116,15 @@ export default function PropertiesPage() {
         <p>Fresh opportunities, organized for living or investing and ready for AI analysis.</p>
       </section>
       <nav className="property-tabs" aria-label="Property type">
-        <button className={mode === "income" ? "active" : ""} onClick={() => { setMode("income"); setShowStarred(false); }}>Income properties</button>
-        <button className={mode === "primary" ? "active" : ""} onClick={() => { setMode("primary"); setShowStarred(false); }}>Primary residences</button>
+        <button className={mode === "income" ? "active" : ""} onClick={() => { setMode("income"); setSort("roi"); setShowStarred(false); }}>Income properties</button>
+        <button className={mode === "primary" ? "active" : ""} onClick={() => { setMode("primary"); setSort("ai"); setShowStarred(false); }}>Primary residences</button>
       </nav>
 
       <nav className="property-folders" aria-label={`${mode} property folders`}>
         <button className={!showStarred ? "active" : ""} onClick={() => setShowStarred(false)}>All {mode === "income" ? "income" : "primary"}</button>
         <button className={showStarred ? "active" : ""} onClick={() => setShowStarred(true)}><span aria-hidden="true">★</span> Starred {mode === "income" ? "income" : "primary"}</button>
       </nav>
+      <div className="property-sort"><label>Sort by<select value={sort} onChange={(event) => setSort(event.target.value as Sort)}>{mode === "income" && <option value="roi">Best estimated ROI</option>}<option value="lot">Largest lot</option><option value="beds">Most beds</option><option value="baths">Most baths</option><option value="sqft">Most square feet</option><option value="price_low">Price: low to high</option><option value="price_high">Price: high to low</option>{mode === "primary" && <option value="ai">Best AI match</option>}</select></label>{mode === "income" && <small>Income and ROI are light AI screening estimates, not verified rent or net returns.</small>}</div>
 
       <form className="property-ai-search" onSubmit={async (event) => {
         event.preventDefault();
@@ -156,7 +168,8 @@ export default function PropertiesPage() {
               <h2><a className="property-address-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">{listing.address}</a></h2>
               <p>{[listing.city, listing.state, listing.zip_code].filter(Boolean).join(", ")}</p>
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
-              <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div></dl>
+              <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div><div><dt>Lot</dt><dd>{listing.lot_size ? listing.lot_size >= 43560 ? `${(listing.lot_size / 43560).toFixed(1)} ac` : `${listing.lot_size.toLocaleString()} sf` : "—"}</dd></div></dl>
+              {mode === "income" && listing.estimated_monthly_income ? <div className="income-estimate"><div><small>Est. monthly income</small><strong>{new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.estimated_monthly_income)}</strong></div><div><small>Est. gross ROI</small><strong>{Number(listing.estimated_roi ?? 0).toFixed(1)}%</strong></div></div> : null}
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               <a className="map-link" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([listing.address, listing.city, listing.state, listing.zip_code].filter(Boolean).join(", "))}`} target="_blank" rel="noreferrer">View map ↗</a>
               <a className="listing-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">View listing ↗</a>
