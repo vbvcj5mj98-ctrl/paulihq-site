@@ -29,9 +29,15 @@ export default function SetupPage() {
       }),
     });
     setBusy(false);
-    const result = (await response.json().catch(() => ({}))) as { error?: string };
+    const responseText = await response.text();
+    let result: { error?: string } = {};
+    try {
+      result = JSON.parse(responseText) as { error?: string };
+    } catch {
+      // Cloudflare platform errors can be HTML, so retain the status below.
+    }
     if (!response.ok) {
-      setError(result.error ?? "Unable to create account.");
+      setError(result.error ?? `Cloudflare stopped the request (error ${response.status}).`);
       return;
     }
     setMessage("Password saved. You can now log in.");

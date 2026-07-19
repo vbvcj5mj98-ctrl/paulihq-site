@@ -12,6 +12,7 @@ interface ExecutionContext { waitUntil(promise: Promise<unknown>): void; passThr
 
 const encoder = new TextEncoder();
 const approvedUsers = new Set(["carsonpauli", "jessipauli"]);
+const passwordHashIterations = 30_000;
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -34,7 +35,9 @@ function secureEqual(left: Uint8Array, right: Uint8Array) {
 
 async function passwordHash(password: string, salt: Uint8Array) {
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 210_000 }, key, 256);
+  // Keep this within the CPU allowance of Cloudflare's free Workers plan.
+  // Unique salts, long passwords, and login throttling provide the other layers.
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: passwordHashIterations }, key, 256);
   return new Uint8Array(bits);
 }
 
