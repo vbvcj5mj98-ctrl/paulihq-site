@@ -7,7 +7,7 @@ import HqHomeLink from "../HqHomeLink";
 type Mode = "primary" | "income";
 type Sort = "roi" | "ai" | "lot" | "beds" | "baths" | "sqft" | "price_low" | "price_high";
 type Listing = { source_id: string; search_id: number; address: string; city?: string; state?: string; zip_code?: string; property_type?: string; price?: number; bedrooms?: number; bathrooms?: number; square_feet?: number; lot_size?: number; days_on_market?: number; search_label: string; ai_score?: number; ai_summary?: string; estimated_monthly_income?: number; estimated_roi?: number; latitude?: number; longitude?: number; image_url?: string; source_page_url?: string; is_favorite?: number };
-type Search = { id: number; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
+type Search = { id: number; owner: string; mode: Mode; label: string; city?: string; state?: string; zip_code?: string };
 type Usage = { requests: number; limit: number; period: string };
 
 function listingUrl(listing: Listing) {
@@ -103,6 +103,17 @@ export default function PropertiesPage() {
     }
   }
 
+  async function deleteSearch(search: Search) {
+    if (!window.confirm(`Delete “${search.label}”? Its saved listings will also be removed and it will no longer receive weekly updates.`)) return;
+    setError("");
+    const response = await fetch("/api/property-searches", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: search.id }) });
+    const result = await response.json() as { error?: string };
+    if (!response.ok) return setError(result.error || "Unable to delete the search.");
+    setListings((current) => current.filter((listing) => listing.search_id !== search.id));
+    setSearches((current) => current.filter((item) => item.id !== search.id));
+    await load();
+  }
+
   return (
     <main className="properties-page">
       <header className="properties-header">
@@ -154,7 +165,7 @@ export default function PropertiesPage() {
       )}
 
       <section className="property-toolbar">
-        <div>{activeSearches.map((search) => <span key={search.id}>{search.label}</span>)}</div>
+        <div>{activeSearches.map((search) => <span className="property-query" key={search.id}>{search.label}{search.owner !== "shared" && <button onClick={() => deleteSearch(search)} aria-label={`Delete ${search.label}`} title="Delete this search and stop weekly updates">×</button>}</span>)}</div>
         <div className="property-feed-state"><small>{sourceConnected ? `Weekly feed connected · ${usage.requests} of ${usage.limit} monthly requests used` : "Listing feed needs connection"}</small>{sourceConnected && <button disabled={syncing} onClick={async () => { setSyncing(true); setError(""); const response = await fetch("/api/properties/sync", { method: "POST" }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "Unable to start the scan."); window.setTimeout(() => { setSyncing(false); load().catch(() => undefined); }, 5000); }}>{syncing ? "Scanning…" : "Scan now"}</button>}</div>
       </section>
       {error && <p className="property-error" role="alert">{error}</p>}

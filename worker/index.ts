@@ -282,9 +282,27 @@ async function simplifyList(request: Request, env: Env, username: string) {
 
 async function propertySearches(request: Request, env: Env, username: string) {
   if (request.method === "GET") {
-    const result = await env.DB.prepare("SELECT id, mode, label, city, state, zip_code, min_price, max_price, active, created_at FROM property_searches WHERE owner = ? OR owner = 'shared' ORDER BY created_at DESC").bind(username).all();
+    const result = await env.DB.prepare("SELECT id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at FROM property_searches WHERE owner = ? OR owner = 'shared' ORDER BY created_at DESC").bind(username).all();
     return json({ searches: result.results ?? [] });
   }
+  if (request.method === "DELETE") {
+    const body = await request.json<{ id?: number }>();
+    const id = Number(body.id);
+    if (!Number.isInteger(id)) return json({ error: "Invalid property search." }, 400);
+    const search = await env.DB.prepare("SELECT owner, label FROM property_searches WHERE id = ?").bind(id).first<{ owner: string; label: string }>();
+    if (!search) return json({ error: "Property search not found." }, 404);
+    if (search.owner !== username) return json({ error: "Only the person who created this search can delete it." }, 403);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM property_favorites WHERE search_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM property_media WHERE search_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM property_coordinates WHERE search_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM property_ai_rankings WHERE search_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM property_listings WHERE search_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM property_searches WHERE id = ? AND owner = ?").bind(id, username),
+    ]);
+    return json({ ok: true });
+  }
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
   const body = await request.json<{ mode?: string; label?: string; city?: string; state?: string; zipCode?: string; minPrice?: number; maxPrice?: number }>();
   const mode = body.mode === "income" ? "income" : "primary";
   const label = String(body.label ?? "").trim().slice(0, 80);
