@@ -69,6 +69,10 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS property_coordinates (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
   ]);
+  const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
+  if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
+    await db.prepare("ALTER TABLE list_items ADD COLUMN assignee TEXT CHECK(assignee IN ('carsonpauli', 'jessipauli'))").run();
+  }
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
 }
 
@@ -175,15 +179,16 @@ async function listItems(request: Request, env: Env, username: string) {
   const url = new URL(request.url);
   const kind = url.searchParams.get("kind") === "grocery" ? "grocery" : "project";
   if (request.method === "GET") {
-    const result = await env.DB.prepare("SELECT id, owner, text, completed, created_at FROM list_items WHERE kind = ? ORDER BY completed ASC, created_at DESC").bind(kind).all();
+    const result = await env.DB.prepare("SELECT id, owner, COALESCE(assignee, owner) AS assignee, text, completed, created_at FROM list_items WHERE kind = ? AND completed = 0 ORDER BY created_at DESC").bind(kind).all();
     return json({ items: result.results ?? [] });
   }
   if (request.method === "POST") {
-    const body = await request.json<{ text?: string; kind?: string }>();
+    const body = await request.json<{ text?: string; kind?: string; assignee?: string }>();
     const itemKind = body.kind === "grocery" ? "grocery" : "project";
+    const assignee = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : username;
     const itemText = String(body.text ?? "").trim().slice(0, 500);
     if (!itemText) return json({ error: "Add an item first." }, 400);
-    await env.DB.prepare("INSERT INTO list_items (owner, kind, text, completed, created_at) VALUES (?, ?, ?, 0, ?)").bind(username, itemKind, itemText, Date.now()).run();
+    await env.DB.prepare("INSERT INTO list_items (owner, assignee, kind, text, completed, created_at) VALUES (?, ?, ?, ?, 0, ?)").bind(username, assignee, itemKind, itemText, Date.now()).run();
     return json({ ok: true }, 201);
   }
   return json({ error: "Method not allowed." }, 405);
@@ -199,8 +204,9 @@ async function updateListItem(request: Request, env: Env, username: string, id: 
 
 async function simplifyList(request: Request, env: Env, username: string) {
   if (!env.OPENAI_API_KEY) return json({ error: "The AI connection has not been added to Cloudflare yet." }, 503);
-  const body = await request.json<{ kind?: string; input?: string }>();
+  const body = await request.json<{ kind?: string; input?: string; assignee?: string }>();
   const kind = body.kind === "grocery" ? "grocery" : "project";
+  const assignee = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : username;
   const input = String(body.input ?? "").trim().slice(0, 4_000);
   if (!input) return json({ error: "Describe what you need first." }, 400);
   const aiResponse = await fetch("https://api.openai.com/v1/responses", {
@@ -219,7 +225,7 @@ async function simplifyList(request: Request, env: Env, username: string) {
   const items = responseText(payload).split("\n").map((line) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 30);
   if (!items.length) return json({ error: "The AI did not return any list items." }, 502);
   const now = Date.now();
-  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, kind, text, completed, created_at) VALUES (?, ?, ?, 0, ?)").bind(username, kind, item.slice(0, 500), now + index)));
+  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, assignee, kind, text, completed, created_at) VALUES (?, ?, ?, ?, 0, ?)").bind(username, assignee, kind, item.slice(0, 500), now + index)));
   return json({ items });
 }
 
