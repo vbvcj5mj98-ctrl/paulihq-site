@@ -6,7 +6,7 @@ export default function Home() {
       <div className="shade" />
       <header className="photo-header">
         <a className="name" href="#home" aria-label="Carson Pauli home">
-          Carson Pauli
+          Pauli HQ
         </a>
         <Link className="login-link" href="/login">
           Log in
@@ -14,7 +14,7 @@ export default function Home() {
       </header>
 
       <section className="photo-content" id="home">
-        <p className="kicker">A place for what comes next</p>
+        <p className="kicker">Carson &amp; family</p>
         <h1>In progress.</h1>
         <p className="intro">
           Projects, ideas, and more to come.

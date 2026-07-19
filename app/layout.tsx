@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Carson Pauli",
-  description: "A place for what comes next.",
+  title: "Pauli HQ",
+  description: "The Pauli family home for what comes next.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

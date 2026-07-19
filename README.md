@@ -1,32 +1,24 @@
-# Carson Pauli — Personal Landing Page
+# Pauli HQ
 
-A simple photo-led landing page with a reserved login screen, built with Next.js and Tailwind CSS.
+A Cloudflare-first family website with a public photo landing page and a private portal protected by Cloudflare Access.
 
-## Before publishing
+## Cloudflare deployment
 
-The login screen is intentionally inactive. Before enabling it, connect it to a real authentication provider so passwords are never handled by an unprotected form.
+1. In Cloudflare, open **Workers & Pages** and choose **Create application**.
+2. Import this GitHub repository.
+3. Use `npm run build` as the build command and `npx wrangler deploy` as the deploy command if Cloudflare does not fill them automatically.
+4. Deploy, then add the purchased domain under **Settings > Domains & Routes**.
 
-## Run locally
+## Protect the private portal
 
-1. Install Node.js 22 or newer.
-2. Run `npm install`.
-3. Run `npm run dev`.
-4. Open the local address shown in the terminal.
+Do this before placing private information in the portal.
 
-## Deploy to Vercel
+1. Open **Zero Trust > Integrations > Identity providers** and add **One-time PIN**.
+2. Open **Zero Trust > Access controls > Applications**.
+3. Create a **Self-hosted and private** application.
+4. Add the public hostname using your domain and path `/portal/*`.
+5. Create an **Allow** policy using the **Emails** selector.
+6. Enter exactly the two approved email addresses—one for Carson and one for his wife.
+7. Select **One-time PIN** as the login method and save.
 
-1. Create a GitHub repository and upload this project.
-2. Sign in to Vercel and choose **Add New → Project**.
-3. Import the GitHub repository and select **Deploy**. Vercel will detect Next.js automatically.
-4. In the Vercel project, open **Settings → Domains** and add your domain.
-
-## Connect a Cloudflare domain
-
-1. Keep the domain active in Cloudflare; email forwarding can remain enabled.
-2. In Vercel, add both the root domain (for example, `pauli.co`) and `www` version.
-3. Vercel will show the exact DNS records it needs.
-4. In Cloudflare, open **DNS → Records**, then add the records Vercel provides.
-5. Remove only conflicting website records for the same host. Do not remove the MX and TXT records used by Email Routing.
-6. Return to Vercel and wait for both domains to show **Valid Configuration**.
-
-DNS updates often take effect within minutes, but can occasionally take longer.
+Cloudflare will intercept `/portal` before the website loads and email an expiring sign-in code to either approved address. Never commit passwords or secrets to this repository.
