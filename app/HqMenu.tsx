@@ -9,6 +9,8 @@ export default function HqMenu({ current }: { current: string }) {
         <option value="/assistant">Assistant</option>
         <option value="/lists">Lists</option>
         <option value="/properties">Property Finder</option>
+        {current === "/profile" && <option value="/profile">Profile</option>}
+        {current === "/admin/users" && <option value="/admin/users">User Management</option>}
       </select>
     </label>
   );

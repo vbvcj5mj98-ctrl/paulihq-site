@@ -68,10 +68,15 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS property_ai_rankings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, score INTEGER NOT NULL, summary TEXT NOT NULL, ranked_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_coordinates (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS user_preferences (username TEXT PRIMARY KEY, property_refresh TEXT NOT NULL DEFAULT 'weekly' CHECK(property_refresh IN ('weekly', 'daily', 'twice_daily')), updated_at INTEGER NOT NULL)"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
     await db.prepare("ALTER TABLE list_items ADD COLUMN assignee TEXT CHECK(assignee IN ('carsonpauli', 'jessipauli'))").run();
+  }
+  const searchColumns = await db.prepare("PRAGMA table_info(property_searches)").all<{ name: string }>();
+  if (!(searchColumns.results ?? []).some((column) => column.name === "last_synced_at")) {
+    await db.prepare("ALTER TABLE property_searches ADD COLUMN last_synced_at INTEGER").run();
   }
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
 }
@@ -249,8 +254,9 @@ async function propertySearches(request: Request, env: Env, username: string) {
 async function propertyListings(request: Request, env: Env, username: string) {
   const url = new URL(request.url);
   const mode = url.searchParams.get("mode") === "income" ? "income" : "primary";
-  const requestedSearchId = Number(url.searchParams.get("searchId"));
-  const searchId = Number.isInteger(requestedSearchId) ? requestedSearchId : null;
+  const searchIdValue = url.searchParams.get("searchId");
+  const requestedSearchId = searchIdValue == null ? null : Number(searchIdValue);
+  const searchId = requestedSearchId != null && Number.isInteger(requestedSearchId) ? requestedSearchId : null;
   const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id
     WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
@@ -450,11 +456,14 @@ async function rankNorthwestArkansas(env: Env) {
   }
 }
 
-async function syncPropertyListings(env: Env) {
+async function syncPropertyListings(env: Env, force = false) {
   if (!env.RENTCAST_API_KEY) return;
   await ensureSchema(env.DB);
-  const searchResult = await env.DB.prepare("SELECT id, mode, city, state, zip_code, min_price, max_price FROM property_searches WHERE active = 1").all<{ id: number; mode: string; city: string | null; state: string | null; zip_code: string | null; min_price: number | null; max_price: number | null }>();
+  const searchResult = await env.DB.prepare(`SELECT s.id, s.mode, s.city, s.state, s.zip_code, s.min_price, s.max_price, s.last_synced_at, COALESCE(p.property_refresh, 'weekly') AS refresh_frequency
+    FROM property_searches s LEFT JOIN user_preferences p ON p.username = s.owner WHERE s.active = 1`).all<{ id: number; mode: string; city: string | null; state: string | null; zip_code: string | null; min_price: number | null; max_price: number | null; last_synced_at: number | null; refresh_frequency: string }>();
   for (const search of searchResult.results ?? []) {
+    const refreshInterval = search.refresh_frequency === "twice_daily" ? 12 * 60 * 60_000 : search.refresh_frequency === "daily" ? 24 * 60 * 60_000 : 7 * 24 * 60 * 60_000;
+    if (!force && search.last_synced_at && Date.now() - search.last_synced_at < refreshInterval) continue;
     const reserved = await reserveRentCastRequest(env.DB);
     if (!reserved) {
       console.log("RentCast monthly request limit reached; property sync stopped.");
@@ -494,6 +503,7 @@ async function syncPropertyListings(env: Env) {
           .bind(sourceId, search.id, Number(item.latitude), Number(item.longitude)).run();
       }
     }
+    await env.DB.prepare("UPDATE property_searches SET last_synced_at = ? WHERE id = ?").bind(now, search.id).run();
   }
   await env.DB.prepare("DELETE FROM property_listings WHERE mode = 'income' AND COALESCE(json_extract(raw_json, '$.hoa.fee'), 0) > 0").run();
   await rankNorthwestArkansas(env);
@@ -551,6 +561,41 @@ async function logout(request: Request, env: Env) {
   });
 }
 
+async function adminUsers(request: Request, env: Env, username: string) {
+  if (username !== "carsonpauli") return json({ error: "Only Carson can manage user accounts." }, 403);
+  if (request.method === "GET") {
+    const result = await env.DB.prepare("SELECT username, created_at FROM users ORDER BY created_at ASC").all();
+    return json({ users: result.results ?? [] });
+  }
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ username?: string; password?: string }>();
+  const newUsername = String(body.username ?? "").trim().toLowerCase();
+  const password = String(body.password ?? "");
+  if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(newUsername)) return json({ error: "Use 3–32 lowercase letters, numbers, periods, underscores, or hyphens." }, 400);
+  if (password.length < 12) return json({ error: "Use a temporary password with at least 12 characters." }, 400);
+  const existing = await env.DB.prepare("SELECT username FROM users WHERE username = ?").bind(newUsername).first();
+  if (existing) return json({ error: "That username already exists." }, 409);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await passwordHash(password, salt);
+  await env.DB.prepare("INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)")
+    .bind(newUsername, bytesToBase64(hash), bytesToBase64(salt), Date.now()).run();
+  return json({ ok: true, username: newUsername }, 201);
+}
+
+async function profileSettings(request: Request, env: Env, username: string) {
+  if (username !== "carsonpauli") return json({ error: "Only Carson can change the property refresh schedule." }, 403);
+  if (request.method === "GET") {
+    const preference = await env.DB.prepare("SELECT property_refresh FROM user_preferences WHERE username = ?").bind(username).first<{ property_refresh: string }>();
+    return json({ username, propertyRefresh: preference?.property_refresh ?? "weekly" });
+  }
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ propertyRefresh?: string }>();
+  const propertyRefresh = ["weekly", "daily", "twice_daily"].includes(String(body.propertyRefresh)) ? String(body.propertyRefresh) : "weekly";
+  await env.DB.prepare("INSERT INTO user_preferences (username, property_refresh, updated_at) VALUES (?, ?, ?) ON CONFLICT(username) DO UPDATE SET property_refresh=excluded.property_refresh, updated_at=excluded.updated_at")
+    .bind(username, propertyRefresh, Date.now()).run();
+  return json({ ok: true, propertyRefresh });
+}
+
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -570,6 +615,21 @@ const worker = {
       if (request.method === "POST" && url.pathname === "/api/setup") return setup(request, env);
       if (request.method === "POST" && url.pathname === "/api/login") return login(request, env);
       if (request.method === "POST" && url.pathname === "/api/logout") return logout(request, env);
+      if (url.pathname === "/api/me") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return json({ username, isAdmin: username === "carsonpauli" });
+      }
+      if (url.pathname === "/api/admin/users") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return adminUsers(request, env, username);
+      }
+      if (url.pathname === "/api/profile") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return profileSettings(request, env, username);
+      }
       if (url.pathname.startsWith("/api/chat")) {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
@@ -590,7 +650,7 @@ const worker = {
         if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
         if (url.pathname === "/api/properties/query" && request.method === "POST") return aiPropertyQuery(request, env, username);
         if (url.pathname === "/api/properties/sync" && request.method === "POST") {
-          ctx.waitUntil(syncPropertyListings(env));
+          ctx.waitUntil(syncPropertyListings(env, true));
           return json({ ok: true, message: "The weekly property scan has started." }, 202);
         }
         if (request.method === "GET") return propertyListings(request, env, username);
@@ -605,7 +665,12 @@ const worker = {
         if (!Number.isInteger(id)) return json({ error: "Invalid list item." }, 400);
         return updateListItem(request, env, username, id);
       }
-      if ((url.pathname.startsWith("/portal") || url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists")) && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
+      if (url.pathname.startsWith("/admin") || url.pathname.startsWith("/profile")) {
+        const username = await authenticated(request, env);
+        if (!username) return Response.redirect(new URL("/login", request.url), 302);
+        if (username !== "carsonpauli") return Response.redirect(new URL("/portal", request.url), 302);
+      }
+      if ((url.pathname.startsWith("/portal") || url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists") || url.pathname.startsWith("/profile")) && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
     } catch (error) {
       console.error("Authentication request failed", error);
       return json({ error: "The authentication service encountered an error." }, 500);

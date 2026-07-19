@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { useEffect, useState } from "react";
 
 const spaces = [
   { title: "Assistant", href: "/assistant" },
@@ -7,6 +10,9 @@ const spaces = [
 ];
 
 export default function PortalPage() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { isAdmin?: boolean }) => setIsAdmin(Boolean(result.isAdmin))).catch(() => undefined); }, []);
+  const visibleSpaces = isAdmin ? [...spaces, { title: "Profile", href: "/profile" }, { title: "User Management", href: "/admin/users" }] : spaces;
   return (
     <main className="hq-page">
       <header className="hq-header">
@@ -19,7 +25,7 @@ export default function PortalPage() {
       </header>
 
       <section className="hq-grid" aria-label="Pauli HQ spaces">
-        {spaces.map((space, index) => (
+        {visibleSpaces.map((space, index) => (
           <Link className="hq-card" href={space.href} key={space.title}>
             <small>{String(index + 1).padStart(2, "0")}</small>
             <h2>{space.title}</h2>
