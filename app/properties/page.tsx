@@ -24,7 +24,7 @@ function PropertyVisual({ listing }: { listing: Listing }) {
 }
 
 export default function PropertiesPage() {
-  const [mode, setMode] = useState<Mode>("primary");
+  const [mode, setMode] = useState<Mode>("income");
   const [listings, setListings] = useState<Listing[]>([]);
   const [searches, setSearches] = useState<Search[]>([]);
   const [sourceConnected, setSourceConnected] = useState(false);
@@ -89,8 +89,8 @@ export default function PropertiesPage() {
         <p>Fresh opportunities, organized for living or investing and ready for AI analysis.</p>
       </section>
       <nav className="property-tabs" aria-label="Property type">
-        <button className={mode === "primary" ? "active" : ""} onClick={() => setMode("primary")}>Primary residences</button>
         <button className={mode === "income" ? "active" : ""} onClick={() => setMode("income")}>Income properties</button>
+        <button className={mode === "primary" ? "active" : ""} onClick={() => setMode("primary")}>Primary residences</button>
       </nav>
 
       <form className="property-ai-search" onSubmit={(event) => {
