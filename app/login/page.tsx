@@ -4,23 +4,30 @@ export default function LoginPage() {
   return (
     <main className="login-page">
       <Link className="back-link" href="/" aria-label="Return home">
-        &larr; Pauli HQ
+        &larr;
       </Link>
 
       <section className="login-card">
-        <p className="kicker">Private family access</p>
-        <h1>Welcome home.</h1>
-        <p className="login-note">
-          Continue to Cloudflare&apos;s secure sign-in. Access is limited to the
-          two approved family email addresses.
-        </p>
-        <Link className="secure-login" href="/portal">
-          Continue to sign in
-        </Link>
-        <p className="login-help">
-          Cloudflare will email you a temporary code. No password is stored by
-          this website.
-        </p>
+        <h1>Log in</h1>
+        <form className="login-form">
+          <label className="sr-only" htmlFor="username">Username</label>
+          <input
+            id="username"
+            name="username"
+            type="text"
+            autoComplete="username"
+            placeholder="Username"
+          />
+          <label className="sr-only" htmlFor="password">Password</label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            placeholder="Password"
+          />
+          <button type="button">Sign in</button>
+        </form>
       </section>
     </main>
   );
