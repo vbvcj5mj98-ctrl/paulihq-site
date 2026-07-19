@@ -89,6 +89,25 @@ function responseText(payload: { output_text?: string; output?: Array<{ content?
   return (payload.output ?? []).flatMap((item) => item.content ?? []).filter((item) => item.type === "output_text").map((item) => item.text ?? "").join("\n").trim();
 }
 
+function safeOpenAIError(status: number, payload: { error?: { code?: string; type?: string; message?: string } }) {
+  const code = payload.error?.code ?? payload.error?.type ?? "";
+  const detail = payload.error?.message?.toLowerCase() ?? "";
+  if (status === 401 || code === "invalid_api_key") return "The OpenAI API key is invalid. Replace the OPENAI_API_KEY secret in Cloudflare.";
+  if (code === "insufficient_quota" || detail.includes("quota") || detail.includes("billing")) return "The OpenAI API account needs billing credit. Add a payment method or credit in the OpenAI Platform account.";
+  if (code === "model_not_found" || detail.includes("does not have access to model")) return "This OpenAI account cannot use the selected model yet. Add OPENAI_MODEL with a model available to your account.";
+  if (status === 429) return "The OpenAI account is temporarily rate limited. Please try again shortly.";
+  return "The OpenAI service could not answer right now.";
+}
+
+async function aiHealth(env: Env) {
+  if (!env.OPENAI_API_KEY) return json({ configured: false, accessible: false, error: "OPENAI_API_KEY is missing." }, 503);
+  const model = env.OPENAI_MODEL || "gpt-5.6-terra";
+  const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, { headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` } });
+  const payload = await response.json() as { error?: { code?: string; type?: string; message?: string } };
+  if (!response.ok) return json({ configured: true, accessible: false, model, error: safeOpenAIError(response.status, payload) }, 502);
+  return json({ configured: true, accessible: true, model });
+}
+
 async function chatHistory(env: Env, username: string) {
   const result = await env.DB.prepare("SELECT role, content, created_at FROM chat_messages WHERE username = ? ORDER BY id DESC LIMIT 60").bind(username).all<{ role: string; content: string; created_at: number }>();
   return json({ messages: (result.results ?? []).reverse() });
@@ -115,20 +134,28 @@ async function chat(request: Request, env: Env, username: string) {
     ? (listResult.results ?? []).map((item) => `[${item.kind}] ${item.completed ? "completed" : "open"}: ${item.text}`).join("\n")
     : "No project or grocery list items are saved yet.";
 
-  const openAIResponse = await fetch("https://api.openai.com/v1/responses", {
+  const requestBody = {
+    model: env.OPENAI_MODEL || "gpt-5.6-terra",
+    instructions: `You are the private Pauli HQ assistant for ${username}. Be practical, clear, and concise. You may answer general questions. You are also given authorized Pauli HQ workspace context from Projects, Documents, Property, Calendar, Tasks, Ideas, and Lists. Never claim you changed site data unless a tool explicitly confirms it. Distinguish saved workspace facts from general knowledge.\n\nAUTHORIZED WORKSPACE CONTEXT:\n${workspaceContext}\n\nAUTHORIZED LIST CONTEXT:\n${listContext}`,
+    input: [...history, { role: "user", content: message }],
+  };
+  let openAIResponse = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-5.6-terra",
-      instructions: `You are the private Pauli HQ assistant for ${username}. Be practical, clear, and concise. You may answer general questions. You are also given authorized Pauli HQ workspace context from Projects, Documents, Property, Calendar, Tasks, Ideas, and Lists. Never claim you changed site data unless a tool explicitly confirms it. Distinguish saved workspace facts from general knowledge.\n\nAUTHORIZED WORKSPACE CONTEXT:\n${workspaceContext}\n\nAUTHORIZED LIST CONTEXT:\n${listContext}`,
-      input: [...history, { role: "user", content: message }],
-      tools: [{ type: "web_search" }],
-    }),
+    body: JSON.stringify({ ...requestBody, tools: [{ type: "web_search" }] }),
   });
-  const payload = await openAIResponse.json() as { error?: { message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  let payload = await openAIResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  if (openAIResponse.status === 400 && (payload.error?.message?.toLowerCase().includes("tool") || payload.error?.message?.toLowerCase().includes("web_search"))) {
+    openAIResponse = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+    payload = await openAIResponse.json() as typeof payload;
+  }
   if (!openAIResponse.ok) {
     console.error("OpenAI request failed", openAIResponse.status, payload.error?.message);
-    return json({ error: openAIResponse.status === 401 ? "The OpenAI API key is not valid." : "The AI service could not answer right now." }, 502);
+    return json({ error: safeOpenAIError(openAIResponse.status, payload) }, 502);
   }
   const answer = responseText(payload);
   if (!answer) return json({ error: "The AI service returned an empty answer." }, 502);
@@ -183,8 +210,8 @@ async function simplifyList(request: Request, env: Env, username: string) {
       input,
     }),
   });
-  const payload = await aiResponse.json() as { error?: { message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
-  if (!aiResponse.ok) return json({ error: aiResponse.status === 401 ? "The OpenAI API key is not valid." : "The AI could not create the list right now." }, 502);
+  const payload = await aiResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  if (!aiResponse.ok) return json({ error: safeOpenAIError(aiResponse.status, payload) }, 502);
   const items = responseText(payload).split("\n").map((line) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 30);
   if (!items.length) return json({ error: "The AI did not return any list items." }, 502);
   const now = Date.now();
@@ -340,6 +367,11 @@ const worker = {
         if (request.method === "GET") return chatHistory(env, username);
         if (request.method === "POST") return chat(request, env, username);
         return json({ error: "Method not allowed." }, 405);
+      }
+      if (url.pathname === "/api/ai-health") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return aiHealth(env);
       }
       if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties") {
         const username = await authenticated(request, env);
