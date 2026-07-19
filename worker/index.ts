@@ -307,18 +307,25 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
-      instructions: `Convert a user's US real-estate request into filters for a property listing API. Return only valid JSON with: label (short string), location (a complete street address, ZIP code, or \"City, ST\"), radius (integer miles 1-100), property_types (array containing only Single Family, Condo, Townhouse, Multi-Family, Apartment, or Land), min_price, max_price, min_bedrooms, and min_bathrooms (numbers or null). Never include mobile homes or manufactured homes, even if the user requests them. Do not invent a location or constraint. If this is an income search and no property type is stated, use [\"Multi-Family\",\"Apartment\"]. If this is a primary-residence search and no type is stated, leave property_types empty.`,
+      instructions: `Convert a user's US real-estate request into strict filters for a property listing API. Preserve every word such as must, minimum, maximum, only, at least, and no. Return only valid JSON with: label (short string), address (street address or null), city (or null), state (two-letter abbreviation or null), zip_code (or null), radius (integer miles 1-100 or null), property_types (array containing only Single Family, Condo, Townhouse, Multi-Family, Apartment, or Land), min_price, max_price, min_bedrooms, min_bathrooms, and min_lot_acres (numbers or null). Convert state names to two-letter abbreviations. Never include mobile homes or manufactured homes. Do not invent or relax a location or constraint. If the request says Arkansas, state must be AR. If it says a minimum number of acres, min_lot_acres must contain that number. If this is an income search and no property type is stated, use [\"Multi-Family\",\"Apartment\"]. If this is a primary-residence search and no type is stated, leave property_types empty.`,
       input: `${mode === "income" ? "Income property" : "Primary residence"} request: ${prompt}`,
     }),
   });
   const aiPayload = await aiResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
   if (!aiResponse.ok) return json({ error: safeOpenAIError(aiResponse.status, aiPayload) }, 502);
-  let filters: { label?: string; location?: string; radius?: number; property_types?: string[]; min_price?: number | null; max_price?: number | null; min_bedrooms?: number | null; min_bathrooms?: number | null };
+  let filters: { label?: string; address?: string | null; city?: string | null; state?: string | null; zip_code?: string | null; radius?: number | null; property_types?: string[]; min_price?: number | null; max_price?: number | null; min_bedrooms?: number | null; min_bathrooms?: number | null; min_lot_acres?: number | null };
   try {
     filters = JSON.parse(responseText(aiPayload).replace(/^```json\s*/i, "").replace(/```\s*$/, ""));
   } catch { return json({ error: "The request could not be converted into property filters. Try including a city, state, or ZIP code." }, 422); }
-  const location = String(filters.location ?? "").trim().slice(0, 160);
-  if (!location) return json({ error: "Please include a city, state, ZIP code, or property address." }, 400);
+  const promptRequiresArkansas = /\b(?:arkansas|ar)\b/i.test(prompt);
+  const acreMatch = prompt.match(/\b(\d+(?:\.\d+)?)\s*(?:\+\s*)?acres?\b/i);
+  const address = String(filters.address ?? "").trim().slice(0, 160);
+  const city = String(filters.city ?? "").trim().slice(0, 80);
+  const state = (promptRequiresArkansas ? "AR" : String(filters.state ?? "").trim().toUpperCase()).slice(0, 2);
+  const zipCode = String(filters.zip_code ?? "").trim().slice(0, 10);
+  const minLotAcres = Math.max(0, Number(acreMatch?.[1] ?? filters.min_lot_acres) || 0);
+  const minLotSquareFeet = minLotAcres > 0 ? Math.ceil(minLotAcres * 43_560) : 0;
+  if (!address && !city && !state && !zipCode) return json({ error: "Please include a city, state, ZIP code, or property address." }, 400);
   const userReservation = await reserveUserPropertyRequest(env.DB, username);
   if (!userReservation.ok) return json({ error: `Your monthly Property Finder limit of ${userReservation.limit} request${userReservation.limit === 1 ? "" : "s"} has been reached.` }, 429);
   if (!(await reserveRentCastRequest(env.DB))) {
@@ -328,25 +335,31 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
 
   const allowedTypes = new Set(["Single Family", "Condo", "Townhouse", "Multi-Family", "Apartment", "Land"]);
   const propertyTypes = (filters.property_types ?? []).filter((type) => allowedTypes.has(type));
-  const params = new URLSearchParams({ address: location, radius: String(Math.max(1, Math.min(100, Math.round(Number(filters.radius) || 20)))), status: "Active", limit: "100" });
+  const params = new URLSearchParams({ status: "Active", limit: "500" });
+  if (zipCode) params.set("zipCode", zipCode);
+  else if (address) { params.set("address", address); params.set("radius", String(Math.max(1, Math.min(100, Math.round(Number(filters.radius) || 20))))); }
+  else { if (city) params.set("city", city); if (state) params.set("state", state); }
   if (propertyTypes.length) params.set("propertyType", propertyTypes.join("|"));
   if (filters.min_price != null || filters.max_price != null) params.set("price", `${Number(filters.min_price) || "*"}:${Number(filters.max_price) || "*"}`);
   if (filters.min_bedrooms != null) params.set("bedrooms", `${Math.max(0, Number(filters.min_bedrooms) || 0)}:*`);
   if (filters.min_bathrooms != null) params.set("bathrooms", `${Math.max(0, Number(filters.min_bathrooms) || 0)}:*`);
+  if (minLotSquareFeet > 0) params.set("lotSize", `${minLotSquareFeet}:*`);
   const feedResponse = await fetch(`https://api.rentcast.io/v1/listings/sale?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
   if (!feedResponse.ok) return json({ error: "The property service could not complete that search. Try a broader location or fewer filters." }, 502);
   const feedListings = await feedResponse.json() as Array<Record<string, unknown>>;
   const label = String(filters.label || prompt).trim().slice(0, 80);
-  const created = await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 0, ?)")
-    .bind(username, mode, label, location, Number(filters.min_price) || null, Number(filters.max_price) || null, Date.now()).run();
+  const created = await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)")
+    .bind(username, mode, label, city || address || null, state || null, zipCode || null, Number(filters.min_price) || null, Number(filters.max_price) || null, Date.now()).run();
   const searchId = Number(created.meta.last_row_id);
   const now = Date.now();
   let saved = 0;
-  for (const item of feedListings.slice(0, 100)) {
+  for (const item of feedListings.slice(0, 500)) {
     const hoa = item.hoa && typeof item.hoa === "object" ? Number((item.hoa as { fee?: unknown }).fee ?? 0) : 0;
     if (mode === "income" && hoa > 0) continue;
     const propertyType = String(item.propertyType ?? "").toLowerCase();
     if (propertyType.includes("mobile") || propertyType.includes("manufactured")) continue;
+    if (state && String(item.state ?? "").toUpperCase() !== state) continue;
+    if (minLotSquareFeet > 0 && Number(item.lotSize ?? 0) < minLotSquareFeet) continue;
     const sourceId = String(item.id ?? "");
     const address = String(item.formattedAddress ?? "");
     if (!sourceId || !address) continue;
