@@ -60,7 +60,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS chat_messages_user_time_idx ON chat_messages (username, created_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS workspace_items (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('private', 'shared')), section TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS workspace_items_access_idx ON workspace_items (owner, visibility, section, updated_at)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS property_searches (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('primary', 'income')), label TEXT NOT NULL, city TEXT, state TEXT, zip_code TEXT, min_price INTEGER, max_price INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_searches (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('primary', 'income')), label TEXT NOT NULL, city TEXT, state TEXT, zip_code TEXT, min_price INTEGER, max_price INTEGER, criteria TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_listings (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, mode TEXT NOT NULL, address TEXT NOT NULL, city TEXT, state TEXT, zip_code TEXT, property_type TEXT, price INTEGER, bedrooms REAL, bathrooms REAL, square_feet INTEGER, lot_size INTEGER, days_on_market INTEGER, status TEXT, listed_at TEXT, source_url TEXT, raw_json TEXT NOT NULL, first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE INDEX IF NOT EXISTS property_listings_mode_seen_idx ON property_listings (mode, last_seen_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS list_items (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('project', 'grocery')), visibility TEXT NOT NULL DEFAULT 'shared' CHECK(visibility IN ('private', 'shared')), text TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, completed_at INTEGER)"),
@@ -92,6 +92,9 @@ async function ensureSchema(db: D1Database) {
   const searchColumns = await db.prepare("PRAGMA table_info(property_searches)").all<{ name: string }>();
   if (!(searchColumns.results ?? []).some((column) => column.name === "last_synced_at")) {
     await db.prepare("ALTER TABLE property_searches ADD COLUMN last_synced_at INTEGER").run();
+  }
+  if (!(searchColumns.results ?? []).some((column) => column.name === "criteria")) {
+    await db.prepare("ALTER TABLE property_searches ADD COLUMN criteria TEXT").run();
   }
   const portfolioColumns = await db.prepare("PRAGMA table_info(portfolio_properties)").all<{ name: string }>();
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "apn")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN apn TEXT NOT NULL DEFAULT ''").run();
@@ -289,8 +292,9 @@ async function propertySearches(request: Request, env: Env, username: string) {
   const state = String(body.state ?? "").trim().toUpperCase().slice(0, 2);
   const zipCode = String(body.zipCode ?? "").trim().slice(0, 10);
   if (!label || (!zipCode && (!city || state.length !== 2))) return json({ error: "Add a name and either a ZIP code or city and two-letter state." }, 400);
-  await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)")
-    .bind(username, mode, label, city || null, state || null, zipCode || null, Number(body.minPrice) || null, Number(body.maxPrice) || null, Date.now()).run();
+  const criteria = [label, city, state, zipCode, body.minPrice ? `minimum price ${body.minPrice}` : "", body.maxPrice ? `maximum price ${body.maxPrice}` : ""].filter(Boolean).join(", ");
+  await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, criteria, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)")
+    .bind(username, mode, label, city || null, state || null, zipCode || null, Number(body.minPrice) || null, Number(body.maxPrice) || null, criteria, Date.now()).run();
   return json({ ok: true }, 201);
 }
 
@@ -584,8 +588,8 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   if (!feedResponse.ok) return json({ error: "The property service could not complete that search. Try a broader location or fewer filters." }, 502);
   const feedListings = await feedResponse.json() as Array<Record<string, unknown>>;
   const label = String(filters.label || prompt).trim().slice(0, 80);
-  const created = await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)")
-    .bind(username, mode, label, city || address || null, state || null, zipCode || null, Number(filters.min_price) || null, Number(filters.max_price) || null, Date.now()).run();
+  const created = await env.DB.prepare("INSERT INTO property_searches (owner, mode, label, city, state, zip_code, min_price, max_price, criteria, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)")
+    .bind(username, mode, label, city || address || null, state || null, zipCode || null, Number(filters.min_price) || null, Number(filters.max_price) || null, prompt, Date.now()).run();
   const searchId = Number(created.meta.last_row_id);
   const now = Date.now();
   let saved = 0;
@@ -605,7 +609,10 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
     if (Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude))) await env.DB.prepare("INSERT INTO property_coordinates (source_id, search_id, latitude, longitude) VALUES (?, ?, ?, ?)").bind(sourceId, searchId, Number(item.latitude), Number(item.longitude)).run();
     saved++;
   }
-  if (mode === "income" && saved > 0) await rankIncomeSearch(env, searchId);
+  if (saved > 0) {
+    if (mode === "income") await rankIncomeSearch(env, searchId);
+    else await rankPrimarySearch(env, searchId);
+  }
   return json({ ok: true, searchId, count: saved, label });
 }
 
@@ -756,15 +763,45 @@ async function rankIncomeSearch(env: Env, searchId: number) {
   }
 }
 
+async function rankPrimarySearch(env: Env, searchId: number) {
+  if (!env.OPENAI_API_KEY) return;
+  const search = await env.DB.prepare("SELECT label, city, state, zip_code, min_price, max_price, criteria FROM property_searches WHERE id = ? AND mode = 'primary'").bind(searchId).first<{ label: string; city: string | null; state: string | null; zip_code: string | null; min_price: number | null; max_price: number | null; criteria: string | null }>();
+  if (!search) return;
+  const result = await env.DB.prepare("SELECT source_id, address, city, state, zip_code, property_type, price, bedrooms, bathrooms, square_feet, lot_size, days_on_market FROM property_listings WHERE search_id = ? AND mode = 'primary' AND status = 'Active' AND (property_type IS NULL OR (lower(property_type) NOT LIKE '%mobile%' AND lower(property_type) NOT LIKE '%manufactured%')) ORDER BY last_seen_at DESC LIMIT 100").bind(searchId).all<Record<string, unknown>>();
+  const candidates = result.results ?? [];
+  if (!candidates.length) return;
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      instructions: "Compare primary-residence listings with the user's exact stated criteria. Use only the supplied criteria and listing facts. Never invent acreage, location, features, condition, commute, neighborhood quality, school quality, or other missing details. Treat words such as must, minimum, maximum, only, and at least as strict. Explicitly identify an important requested fact as unverified when the listing data does not provide it. Return only valid JSON as an array with up to 50 objects: source_id (string), score (integer 0-100), summary (one or two concise sentences describing the strongest matches, conflicts, and any important unverified criterion).",
+      input: JSON.stringify({ criteria: search.criteria || search.label, savedFilters: { city: search.city, state: search.state, zipCode: search.zip_code, minPrice: search.min_price, maxPrice: search.max_price }, listings: candidates }),
+    }),
+  });
+  if (!response.ok) { console.error("Primary property AI overview failed", response.status); return; }
+  const payload = await response.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  try {
+    const rankings = JSON.parse(responseText(payload).replace(/^```json\s*/i, "").replace(/```\s*$/, "")) as Array<{ source_id?: string; score?: number; summary?: string }>;
+    const sourceIds = new Set(candidates.map((candidate) => String(candidate.source_id)));
+    const valid = rankings.filter((item) => item.source_id && sourceIds.has(String(item.source_id)) && Number.isFinite(Number(item.score)) && item.summary).slice(0, 50);
+    if (!valid.length) return;
+    const now = Date.now();
+    await env.DB.batch(valid.map((item) => env.DB.prepare("INSERT INTO property_ai_rankings (source_id, search_id, score, summary, estimated_monthly_income, estimated_roi, ranked_at) VALUES (?, ?, ?, ?, NULL, NULL, ?) ON CONFLICT(source_id, search_id) DO UPDATE SET score=excluded.score, summary=excluded.summary, estimated_monthly_income=NULL, estimated_roi=NULL, ranked_at=excluded.ranked_at")
+      .bind(String(item.source_id), searchId, Math.max(0, Math.min(100, Math.round(Number(item.score)))), String(item.summary).slice(0, 600), now)));
+  } catch (error) { console.error("Primary property AI overview response was invalid", error); }
+}
+
 async function rankPropertySearch(request: Request, env: Env, username: string) {
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
   if (!env.OPENAI_API_KEY) return json({ error: "The AI connection is not configured." }, 503);
   const body = await request.json<{ searchId?: number }>();
   const searchId = Number(body.searchId);
   if (!Number.isInteger(searchId)) return json({ error: "Invalid property search." }, 400);
-  const search = await env.DB.prepare("SELECT id FROM property_searches WHERE id = ? AND mode = 'income' AND (owner = ? OR owner = 'shared')").bind(searchId, username).first();
-  if (!search) return json({ error: "Income property search not found." }, 404);
-  await rankIncomeSearch(env, searchId);
+  const search = await env.DB.prepare("SELECT id, mode FROM property_searches WHERE id = ? AND (owner = ? OR owner = 'shared')").bind(searchId, username).first<{ id: number; mode: string }>();
+  if (!search) return json({ error: "Property search not found." }, 404);
+  if (search.mode === "income") await rankIncomeSearch(env, searchId);
+  else await rankPrimarySearch(env, searchId);
   return json({ ok: true });
 }
 
@@ -819,6 +856,7 @@ async function syncPropertyListings(env: Env, force = false) {
     }
     await env.DB.prepare("UPDATE property_searches SET last_synced_at = ? WHERE id = ?").bind(now, search.id).run();
     if (search.mode === "income") await rankIncomeSearch(env, search.id);
+    else await rankPrimarySearch(env, search.id);
   }
   await env.DB.prepare("DELETE FROM property_listings WHERE mode = 'income' AND COALESCE(json_extract(raw_json, '$.hoa.fee'), 0) > 0").run();
   await env.DB.prepare("DELETE FROM property_listings WHERE lower(COALESCE(property_type, '')) LIKE '%mobile%' OR lower(COALESCE(property_type, '')) LIKE '%manufactured%'").run();

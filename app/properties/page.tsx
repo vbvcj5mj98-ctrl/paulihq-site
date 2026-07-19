@@ -68,8 +68,7 @@ export default function PropertiesPage() {
   }, [listings, load]);
 
   useEffect(() => {
-    if (mode !== "income") return;
-    const searchIds = [...new Set(listings.filter((listing) => !listing.estimated_monthly_income && !attemptedRankings.current.has(listing.search_id)).map((listing) => listing.search_id))].slice(0, 3);
+    const searchIds = [...new Set(listings.filter((listing) => (mode === "income" ? !listing.estimated_monthly_income : !listing.ai_summary) && !attemptedRankings.current.has(listing.search_id)).map((listing) => listing.search_id))].slice(0, 3);
     if (!searchIds.length) return;
     for (const searchId of searchIds) attemptedRankings.current.add(searchId);
     Promise.allSettled(searchIds.map((searchId) => fetch("/api/properties/rank", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ searchId }) }))).then(() => load().catch(() => undefined));
@@ -170,7 +169,7 @@ export default function PropertiesPage() {
               <strong>{listing.price ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.price) : "Price unavailable"}</strong>
               <dl><div><dt>Beds</dt><dd>{listing.bedrooms ?? "—"}</dd></div><div><dt>Baths</dt><dd>{listing.bathrooms ?? "—"}</dd></div><div><dt>Sq ft</dt><dd>{listing.square_feet?.toLocaleString() ?? "—"}</dd></div><div><dt>Lot</dt><dd>{listing.lot_size ? listing.lot_size >= 43560 ? `${(listing.lot_size / 43560).toFixed(1)} ac` : `${listing.lot_size.toLocaleString()} sf` : "—"}</dd></div></dl>
               {mode === "income" && listing.estimated_monthly_income ? <div className="income-estimate"><div><small>Est. monthly income</small><strong>{new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(listing.estimated_monthly_income)}</strong></div><div><small>Est. gross ROI</small><strong>{Number(listing.estimated_roi ?? 0).toFixed(1)}%</strong></div></div> : null}
-              {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
+              {listing.ai_summary && <div className={`property-ai-summary${mode === "primary" ? " primary" : ""}`}>{mode === "primary" && <small>AI overview</small>}<p>{listing.ai_summary}</p></div>}
               <a className="map-link" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([listing.address, listing.city, listing.state, listing.zip_code].filter(Boolean).join(", "))}`} target="_blank" rel="noreferrer">View map ↗</a>
               <a className="listing-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">View listing ↗</a>
               <button onClick={() => window.dispatchEvent(new CustomEvent("open-pauli-assistant", { detail: { prompt: `Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.` } }))}>Analyze with AI</button>
