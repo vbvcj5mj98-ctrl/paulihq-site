@@ -4,36 +4,44 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const spaces = [
-  { key: "assistant", title: "Assistant", href: "/assistant" },
-  { key: "lists", title: "Lists", href: "/lists" },
-  { key: "properties", title: "Property Finder", href: "/properties" },
+  { key: "properties", title: "Property Finder", description: "Search, filter, map, and analyze real-estate opportunities.", href: "/properties" },
+  { key: "assistant", title: "Assistant", description: "Private AI assistance with access to your Pauli HQ workspace.", href: "/assistant" },
+  { key: "lists", title: "Lists", description: "Shared projects, assignments, and grocery lists in one place.", href: "/lists" },
 ];
 
 export default function PortalPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
-  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); }).catch(() => undefined); }, []);
-  const visibleSpaces = [...spaces.filter((space) => permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", href: "/admin/users" }] : [])];
+  const [username, setUsername] = useState("");
+  const [ready, setReady] = useState(false);
+  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setUsername(result.username ?? ""); setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); setReady(true); }).catch(() => setReady(true)); }, []);
+  const visibleSpaces = [...spaces.filter((space) => permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", description: "Manage property refresh preferences and account settings.", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
+  const displayName = username === "carsonpauli" ? "Carson" : username === "jessipauli" ? "Jessi" : username;
   return (
     <main className="hq-page">
       <header className="hq-header">
         <Link className="pauli-logo-link" href="/" aria-label="Pauli HQ home"><img className="pauli-logo pauli-logo-portal" src="/paulihq-wordmark-earth.png" alt="Pauli HQ" /></Link>
         <div className="hq-actions">
+          {displayName && <span>{displayName}</span>}
           <form action="/api/logout" method="post">
             <button type="submit" className="text-button">Log out</button>
           </form>
         </div>
       </header>
 
-      <section className="hq-grid" aria-label="Pauli HQ spaces">
-        {visibleSpaces.map((space, index) => (
-          <Link className="hq-card" href={space.href} key={space.title}>
-            <small>{String(index + 1).padStart(2, "0")}</small>
-            <h2>{space.title}</h2>
-            <span aria-hidden="true">→</span>
-          </Link>
-        ))}
-      </section>
+      <div className="hq-main">
+        <section className="hq-intro"><p>Private workspace</p><h1>Everything in one place.</h1><span>Secure access for the Pauli household.</span></section>
+        <section className="hq-grid" aria-label="Pauli HQ spaces">
+          {!ready ? <div className="hq-loading">Loading workspace…</div> : visibleSpaces.map((space, index) => (
+            <Link className="hq-card" href={space.href} key={space.title}>
+              <div className="hq-card-top"><small>{String(index + 1).padStart(2, "0")}</small><span>{space.key.replace("_", " ")}</span></div>
+              <div><h2>{space.title}</h2><p>{space.description}</p></div>
+              <b aria-hidden="true">↗</b>
+            </Link>
+          ))}
+        </section>
+        <footer className="hq-footer"><span>PAULI HQ</span><span>Private · Secure · Shared</span></footer>
+      </div>
     </main>
   );
 }
