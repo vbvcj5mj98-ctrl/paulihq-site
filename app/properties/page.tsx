@@ -173,7 +173,7 @@ export default function PropertiesPage() {
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               <a className="map-link" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([listing.address, listing.city, listing.state, listing.zip_code].filter(Boolean).join(", "))}`} target="_blank" rel="noreferrer">View map ↗</a>
               <a className="listing-link" href={listingUrl(listing)} target="_blank" rel="noreferrer">View listing ↗</a>
-              <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
+              <button onClick={() => window.dispatchEvent(new CustomEvent("open-pauli-assistant", { detail: { prompt: `Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.` } }))}>Analyze with AI</button>
             </article>
           ))}
         </section>

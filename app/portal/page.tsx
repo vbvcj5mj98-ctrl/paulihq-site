@@ -6,17 +6,15 @@ import { useEffect, useState } from "react";
 const spaces = [
   { key: "properties", title: "Property Finder", description: "Search, filter, map, and analyze real-estate opportunities.", href: "/properties" },
   { key: "portfolio", title: "Property Portfolio", description: "Manage owned properties, values, occupancy, sharing, and local weather.", href: "/portfolio" },
-  { key: "assistant", title: "Assistant", description: "Private AI assistance with access to your Pauli HQ workspace.", href: "/assistant" },
   { key: "lists", title: "Lists", description: "Shared projects, assignments, and grocery lists in one place.", href: "/lists" },
 ];
 
 export default function PortalPage() {
-  const [isAdmin, setIsAdmin] = useState(false);
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [username, setUsername] = useState("");
   const [ready, setReady] = useState(false);
-  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setUsername(result.username ?? ""); setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); setReady(true); }).catch(() => setReady(true)); }, []);
-  const visibleSpaces = [...spaces.filter((space) => space.key === "portfolio" || permissions[space.key]), { key: "profile", title: "Profile", description: isAdmin ? "Manage your password, property refresh preferences, and account settings." : "Change your password and manage your account.", href: "/profile" }, ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
+  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; permissions?: Record<string, boolean> }) => { setUsername(result.username ?? ""); setPermissions(result.permissions ?? {}); setReady(true); }).catch(() => setReady(true)); }, []);
+  const visibleSpaces = [...spaces.filter((space) => space.key === "portfolio" || permissions[space.key]), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
   const displayName = username === "carsonpauli" ? "Carson" : username === "jessipauli" ? "Jessi" : username;
   return (
     <main className="hq-page">
@@ -24,6 +22,7 @@ export default function PortalPage() {
         <Link className="pauli-logo-link" href="/" aria-label="Pauli HQ home"><img className="pauli-logo pauli-logo-portal" src="/paulihq-wordmark-earth.png" alt="Pauli HQ" /></Link>
         <div className="hq-actions">
           {displayName && <span>{displayName}</span>}
+          <Link className="hq-settings" href="/profile" aria-label="Profile settings" title="Profile settings">⚙</Link>
           <form action="/api/logout" method="post">
             <button type="submit" className="text-button">Log out</button>
           </form>

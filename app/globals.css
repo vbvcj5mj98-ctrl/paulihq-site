@@ -96,6 +96,38 @@ a { color: inherit; text-decoration: none; }
 .hq-settings { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #b8b5ab; border-radius: 50%; color: #59615d; font-size: 1rem; line-height: 1; text-decoration: none; transition: background .18s ease, color .18s ease, transform .18s ease; }
 .hq-settings:hover, .hq-settings:focus-visible, .hq-settings.active { background: #1b2929; border-color: #1b2929; color: #f3f0e8; transform: rotate(22deg); }
 .properties-nav { display: flex; align-items: center; gap: 16px; }
+.assistant-bubble { position: fixed; right: 22px; bottom: 22px; z-index: 80; display: grid; justify-items: end; gap: 12px; }
+.assistant-launcher { width: 56px; height: 56px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #1b2929; color: #f4f1e8; box-shadow: 0 12px 34px rgba(24,35,34,.28); cursor: pointer; }
+.assistant-launcher span { font-size: .76rem; font-weight: 750; letter-spacing: .08em; }
+.assistant-bubble.open .assistant-launcher span { font-size: 1.45rem; font-weight: 300; }
+.assistant-popover { width: min(390px, calc(100vw - 28px)); height: min(560px, calc(100svh - 110px)); display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; border: 1px solid #b8b5ab; background: #f4f1e9; color: #1b2929; box-shadow: 0 24px 70px rgba(24,35,34,.26); }
+.assistant-popover > header { min-height: 67px; padding: 13px 16px 12px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #cbc7bc; background: #e5e1d6; }
+.assistant-popover > header div { display: grid; gap: 2px; }
+.assistant-popover > header small { color: #777970; font-size: .56rem; font-weight: 700; letter-spacing: .16em; }
+.assistant-popover > header strong { font-family: Georgia, 'Times New Roman', serif; font-size: 1.3rem; font-weight: 400; }
+.assistant-popover > header button { width: 34px; height: 34px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 1.55rem; cursor: pointer; }
+.assistant-popover-messages { min-height: 0; padding: 18px; display: grid; align-content: start; gap: 15px; overflow-y: auto; overscroll-behavior: contain; }
+.assistant-popover-messages article { max-width: 88%; display: grid; gap: 4px; }
+.assistant-popover-messages article.user { justify-self: end; }
+.assistant-popover-messages article small { color: #7b7d75; font-size: .56rem; letter-spacing: .08em; text-transform: uppercase; }
+.assistant-popover-messages article.user small { text-align: right; }
+.assistant-popover-messages article p { margin: 0; padding: 10px 12px; background: #e6e2d7; font-size: .78rem; line-height: 1.5; white-space: pre-wrap; }
+.assistant-popover-messages article.user p { background: #1b2929; color: #f5f1e8; }
+.assistant-popover-empty { margin: auto; max-width: 240px; color: #73756e; font-family: Georgia, 'Times New Roman', serif; font-size: 1.05rem; line-height: 1.5; text-align: center; }
+.assistant-popover-error { margin: 0; padding: 9px 11px; background: #efe0d8; color: #7f3e2f; font-size: .7rem; }
+.assistant-popover-thinking { display: flex; gap: 4px; padding: 8px 2px; }
+.assistant-popover-thinking i { width: 5px; height: 5px; border-radius: 50%; background: #777970; animation: chat-dot 1s infinite alternate; }
+.assistant-popover-thinking i:nth-child(2) { animation-delay: .15s; }
+.assistant-popover-thinking i:nth-child(3) { animation-delay: .3s; }
+.assistant-popover > form { padding: 12px; display: grid; grid-template-columns: minmax(0,1fr) 40px; gap: 8px; border-top: 1px solid #cbc7bc; background: #ebe7dc; }
+.assistant-popover > form textarea { min-height: 42px; max-height: 100px; padding: 11px 12px; resize: none; border: 1px solid #b8b5ab; border-radius: 0; background: #f8f5ee; color: inherit; font: inherit; font-size: .78rem; }
+.assistant-popover > form button { border: 0; background: #1b2929; color: #f5f1e8; font-size: 1.15rem; cursor: pointer; }
+.assistant-popover > form button:disabled { opacity: .38; cursor: default; }
+@media (max-width: 560px) {
+  .assistant-bubble { right: 14px; bottom: 14px; }
+  .assistant-popover { height: min(520px, calc(100svh - 92px)); }
+  .hq-username { display: none; }
+}
 .chat-shell { width: min(100%, 860px); height: calc(100svh - 72px); margin: auto; padding: 34px 24px 22px; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .chat-heading { padding-bottom: 24px; border-bottom: 1px solid #c7c4ba; }
 .chat-heading h1 { margin: 0 0 9px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(2.5rem, 6vw, 4.5rem); font-weight: 400; letter-spacing: -.055em; }

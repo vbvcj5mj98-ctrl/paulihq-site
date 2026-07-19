@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import AssistantBubble from "./AssistantBubble";
 
 export const metadata: Metadata = {
   title: "Pauli HQ",
@@ -13,7 +14,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>{children}<AssistantBubble /></body>
     </html>
   );
 }
