@@ -74,6 +74,9 @@ async function ensureSchema(db: D1Database) {
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
     await db.prepare("ALTER TABLE list_items ADD COLUMN assignee TEXT CHECK(assignee IN ('carsonpauli', 'jessipauli'))").run();
   }
+  if (!(listColumns.results ?? []).some((column) => column.name === "assignment")) {
+    await db.prepare("ALTER TABLE list_items ADD COLUMN assignment TEXT CHECK(assignment IN ('shared', 'carsonpauli', 'jessipauli'))").run();
+  }
   const searchColumns = await db.prepare("PRAGMA table_info(property_searches)").all<{ name: string }>();
   if (!(searchColumns.results ?? []).some((column) => column.name === "last_synced_at")) {
     await db.prepare("ALTER TABLE property_searches ADD COLUMN last_synced_at INTEGER").run();
@@ -184,16 +187,17 @@ async function listItems(request: Request, env: Env, username: string) {
   const url = new URL(request.url);
   const kind = url.searchParams.get("kind") === "grocery" ? "grocery" : "project";
   if (request.method === "GET") {
-    const result = await env.DB.prepare("SELECT id, owner, COALESCE(assignee, owner) AS assignee, text, completed, created_at FROM list_items WHERE kind = ? AND completed = 0 ORDER BY created_at DESC").bind(kind).all();
+    const result = await env.DB.prepare("SELECT id, owner, COALESCE(assignment, assignee, owner) AS assignee, text, completed, created_at FROM list_items WHERE kind = ? AND completed = 0 ORDER BY created_at DESC").bind(kind).all();
     return json({ items: result.results ?? [] });
   }
   if (request.method === "POST") {
     const body = await request.json<{ text?: string; kind?: string; assignee?: string }>();
     const itemKind = body.kind === "grocery" ? "grocery" : "project";
-    const assignee = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : username;
+    const assignment = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : "shared";
+    const legacyAssignee = assignment === "shared" ? null : assignment;
     const itemText = String(body.text ?? "").trim().slice(0, 500);
     if (!itemText) return json({ error: "Add an item first." }, 400);
-    await env.DB.prepare("INSERT INTO list_items (owner, assignee, kind, text, completed, created_at) VALUES (?, ?, ?, ?, 0, ?)").bind(username, assignee, itemKind, itemText, Date.now()).run();
+    await env.DB.prepare("INSERT INTO list_items (owner, assignee, assignment, kind, text, completed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)").bind(username, legacyAssignee, assignment, itemKind, itemText, Date.now()).run();
     return json({ ok: true }, 201);
   }
   return json({ error: "Method not allowed." }, 405);
@@ -211,7 +215,8 @@ async function simplifyList(request: Request, env: Env, username: string) {
   if (!env.OPENAI_API_KEY) return json({ error: "The AI connection has not been added to Cloudflare yet." }, 503);
   const body = await request.json<{ kind?: string; input?: string; assignee?: string }>();
   const kind = body.kind === "grocery" ? "grocery" : "project";
-  const assignee = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : username;
+  const assignment = body.assignee === "jessipauli" ? "jessipauli" : body.assignee === "carsonpauli" ? "carsonpauli" : "shared";
+  const legacyAssignee = assignment === "shared" ? null : assignment;
   const input = String(body.input ?? "").trim().slice(0, 4_000);
   if (!input) return json({ error: "Describe what you need first." }, 400);
   const aiResponse = await fetch("https://api.openai.com/v1/responses", {
@@ -230,7 +235,7 @@ async function simplifyList(request: Request, env: Env, username: string) {
   const items = responseText(payload).split("\n").map((line) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 30);
   if (!items.length) return json({ error: "The AI did not return any list items." }, 502);
   const now = Date.now();
-  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, assignee, kind, text, completed, created_at) VALUES (?, ?, ?, ?, 0, ?)").bind(username, assignee, kind, item.slice(0, 500), now + index)));
+  await env.DB.batch(items.map((item, index) => env.DB.prepare("INSERT INTO list_items (owner, assignee, assignment, kind, text, completed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)").bind(username, legacyAssignee, assignment, kind, item.slice(0, 500), now + index)));
   return json({ items });
 }
 

@@ -5,7 +5,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import HqMenu from "../HqMenu";
 
 type Kind = "project" | "grocery";
-type Assignee = "carsonpauli" | "jessipauli";
+type Assignee = "shared" | "carsonpauli" | "jessipauli";
 type Item = { id: number; owner: string; assignee: Assignee; text: string; completed: number; created_at: number };
 
 type SpeechRecognitionInstance = { continuous: boolean; interimResults: boolean; lang: string; start(): void; stop(): void; onresult: ((event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null };
@@ -15,7 +15,7 @@ export default function ListsPage() {
   const [kind, setKind] = useState<Kind>("project");
   const [items, setItems] = useState<Item[]>([]);
   const [input, setInput] = useState("");
-  const [assignee, setAssignee] = useState<Assignee>("carsonpauli");
+  const [assignee, setAssignee] = useState<Assignee>("shared");
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [error, setError] = useState("");
@@ -77,11 +77,11 @@ export default function ListsPage() {
         <nav className="property-tabs"><button className={kind === "project" ? "active" : ""} onClick={() => setKind("project")}>Projects</button><button className={kind === "grocery" ? "active" : ""} onClick={() => setKind("grocery")}>Grocery list</button></nav>
         <form className="list-capture" onSubmit={simplify}>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={kind === "project" ? "Describe what you want to accomplish..." : "Tell me what you need from the store..."} rows={4} />
-          <div className="list-controls"><label>For <select value={assignee} onChange={(event) => setAssignee(event.target.value as Assignee)}><option value="carsonpauli">Carson</option><option value="jessipauli">Jessi</option></select></label><span><button className={listening ? "listening" : ""} type="button" onClick={listen}>{listening ? "Listening…" : "● Speak"}</button><button type="submit" disabled={busy || !input.trim()}>{busy ? "Simplifying…" : "Create simple list"}</button></span></div>
+          <div className="list-controls"><label>For <select value={assignee} onChange={(event) => setAssignee(event.target.value as Assignee)}><option value="shared">Shared</option><option value="carsonpauli">Carson</option><option value="jessipauli">Jessi</option></select></label><span><button className={listening ? "listening" : ""} type="button" onClick={listen}>{listening ? "Listening…" : "● Speak"}</button><button type="submit" disabled={busy || !input.trim()}>{busy ? "Simplifying…" : "Create simple list"}</button></span></div>
         </form>
         {error && <p className="property-error" role="alert">{error}</p>}
         <section className="checklist" aria-label={kind === "project" ? "Project tasks" : "Grocery items"}>
-          {items.length === 0 ? <p className="list-empty">Your shared list is ready for its first idea.</p> : items.map((item) => <label key={item.id}><input type="checkbox" checked={false} onChange={() => toggle(item)} /><span>{item.text}<small>For {item.assignee === "carsonpauli" ? "Carson" : "Jessi"} · added by {item.owner === "carsonpauli" ? "Carson" : "Jessi"}</small></span></label>)}
+          {items.length === 0 ? <p className="list-empty">Your shared list is ready for its first idea.</p> : items.map((item) => <label key={item.id}><input type="checkbox" checked={false} onChange={() => toggle(item)} /><span>{item.text}<small>For {item.assignee === "shared" ? "Carson + Jessi" : item.assignee === "carsonpauli" ? "Carson" : "Jessi"} · added by {item.owner === "carsonpauli" ? "Carson" : item.owner === "jessipauli" ? "Jessi" : item.owner}</small></span></label>)}
         </section>
       </section>
     </main>
