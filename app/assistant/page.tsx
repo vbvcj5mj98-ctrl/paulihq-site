@@ -24,7 +24,10 @@ export default function AssistantPage() {
     }).catch((reason: Error) => setError(reason.message));
   }, []);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, busy]);
+  useEffect(() => {
+    const marker = endRef.current;
+    if (marker && typeof marker.scrollIntoView === "function") marker.scrollIntoView({ behavior: "smooth" });
+  }, [messages, busy]);
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
