@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+:root { --white: #f8f6f0; --dark: #141713; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { background: var(--dark); color: var(--white); font-family: Arial, Helvetica, sans-serif; }
+a { color: inherit; text-decoration: none; }
+
+.photo-page {
+  position: relative;
+  min-height: 100svh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: url('/hero-landscape.png') center center / cover no-repeat;
+}
+.shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(7, 9, 6, .6) 0%, rgba(7, 9, 6, .15) 60%, rgba(7, 9, 6, .27) 100%); }
+.photo-header, .photo-content, .photo-footer { position: relative; z-index: 1; }
+.photo-header, .photo-footer { display: flex; align-items: center; justify-content: space-between; padding: 32px 42px; }
+.name { font-size: .95rem; font-weight: 650; letter-spacing: .02em; }
+.login-link { padding: 11px 19px; border: 1px solid rgba(255,255,255,.65); border-radius: 100px; font-size: .8rem; transition: background 180ms ease, color 180ms ease; }
+.login-link:hover { background: var(--white); color: var(--dark); }
+.photo-content { align-self: center; padding: 5vh 42px; }
+.kicker { margin: 0 0 22px; font-size: .69rem; font-weight: 650; letter-spacing: .18em; text-transform: uppercase; }
+.photo-content h1 { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(4.5rem, 12vw, 10.5rem); font-weight: 400; line-height: .85; letter-spacing: -.06em; }
+.intro { margin: 28px 0 0 6px; font-size: clamp(.95rem, 1.4vw, 1.15rem); }
+.photo-footer { padding-top: 24px; padding-bottom: 28px; font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; }
+.photo-footer p { margin: 0; }
+
+.login-page { min-height: 100svh; background: #ece9e0; color: var(--dark); display: grid; place-items: center; padding: 90px 24px 48px; }
+.back-link { position: absolute; top: 34px; left: 42px; font-size: .85rem; }
+.login-card { width: min(100%, 420px); }
+.login-card h1 { margin: 0 0 20px; font-family: Georgia, 'Times New Roman', serif; font-size: clamp(3.8rem, 10vw, 5.5rem); font-weight: 400; letter-spacing: -.05em; }
+.login-note { margin: 0 0 42px; color: #5c5e56; line-height: 1.6; }
+.login-form { display: grid; gap: 10px; }
+.login-form label { margin-top: 12px; font-size: .72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .12em; }
+.login-form input { width: 100%; height: 52px; padding: 0 14px; border: 1px solid #b8b6ae; border-radius: 0; background: rgba(255,255,255,.32); color: var(--dark); font: inherit; }
+.login-form button { height: 52px; margin-top: 16px; border: 0; background: var(--dark); color: var(--white); font: inherit; opacity: .48; cursor: not-allowed; }
+
+@media (max-width: 650px) {
+  .photo-page { background-position: 61% center; }
+  .shade { background: linear-gradient(90deg, rgba(7,9,6,.62), rgba(7,9,6,.16)); }
+  .photo-header, .photo-footer { padding-left: 22px; padding-right: 22px; }
+  .photo-header { padding-top: 22px; }
+  .photo-content { padding-left: 22px; padding-right: 22px; }
+  .photo-content h1 { font-size: clamp(4.25rem, 23vw, 7rem); }
+  .back-link { top: 24px; left: 22px; }
+}
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
