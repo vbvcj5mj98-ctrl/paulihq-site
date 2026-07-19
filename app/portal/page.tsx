@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 const spaces = [
   { key: "properties", title: "Property Finder", description: "Search, filter, map, and analyze real-estate opportunities.", href: "/properties" },
+  { key: "portfolio", title: "Property Portfolio", description: "Manage owned properties, values, occupancy, sharing, and local weather.", href: "/portfolio" },
   { key: "assistant", title: "Assistant", description: "Private AI assistance with access to your Pauli HQ workspace.", href: "/assistant" },
   { key: "lists", title: "Lists", description: "Shared projects, assignments, and grocery lists in one place.", href: "/lists" },
 ];
@@ -15,7 +16,7 @@ export default function PortalPage() {
   const [username, setUsername] = useState("");
   const [ready, setReady] = useState(false);
   useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setUsername(result.username ?? ""); setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); setReady(true); }).catch(() => setReady(true)); }, []);
-  const visibleSpaces = [...spaces.filter((space) => permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", description: "Manage property refresh preferences and account settings.", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
+  const visibleSpaces = [...spaces.filter((space) => space.key === "portfolio" || permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", description: "Manage property refresh preferences and account settings.", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", description: "Create accounts, reset passwords, and manage page access.", href: "/admin/users" }] : [])];
   const displayName = username === "carsonpauli" ? "Carson" : username === "jessipauli" ? "Jessi" : username;
   return (
     <main className="hq-page">
@@ -40,7 +41,7 @@ export default function PortalPage() {
             </Link>
           ))}
         </section>
-        <footer className="hq-footer"><span>PAULI HQ</span><span>Private · Secure · Shared</span></footer>
+        <footer className="hq-footer"><img src="/paulihq-wordmark-earth.png" alt="Pauli HQ" /><span>Private · Secure · Shared</span></footer>
       </div>
     </main>
   );

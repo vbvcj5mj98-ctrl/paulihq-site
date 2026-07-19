@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import HqMenu from "../HqMenu";
+import HqHomeLink from "../HqHomeLink";
 
 type Kind = "project" | "grocery";
 type Assignee = "shared" | "carsonpauli" | "jessipauli";
@@ -71,7 +71,7 @@ export default function ListsPage() {
 
   return (
     <main className="lists-page">
-      <header className="properties-header"><Link href="/portal">← Pauli HQ</Link><HqMenu current="/lists" /></header>
+      <header className="properties-header"><HqHomeLink /><HqMenu current="/lists" /></header>
       <section className="lists-shell">
         <div className="lists-heading"><p className="kicker">AI-powered lists</p><h1>{kind === "project" ? "Turn plans into progress." : "Make shopping simple."}</h1></div>
         <nav className="property-tabs"><button className={kind === "project" ? "active" : ""} onClick={() => setKind("project")}>Projects</button><button className={kind === "grocery" ? "active" : ""} onClick={() => setKind("grocery")}>Grocery list</button></nav>

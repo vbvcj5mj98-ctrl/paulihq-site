@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import HqMenu from "../HqMenu";
+import HqHomeLink from "../HqHomeLink";
 
 type Message = { role: "user" | "assistant"; content: string; created_at?: number };
 
@@ -57,7 +57,7 @@ export default function AssistantPage() {
   return (
     <main className="assistant-page">
       <header className="assistant-header">
-        <Link href="/portal" className="assistant-back">← Pauli HQ</Link>
+        <HqHomeLink />
         <HqMenu current="/assistant" />
       </header>
 

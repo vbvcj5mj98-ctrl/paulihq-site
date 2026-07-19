@@ -72,6 +72,12 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS user_page_permissions (username TEXT NOT NULL, page_key TEXT NOT NULL CHECK(page_key IN ('assistant', 'lists', 'properties', 'user_management')), allowed INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, page_key))"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_property_limits (username TEXT PRIMARY KEY, monthly_limit INTEGER NOT NULL CHECK(monthly_limit >= 0 AND monthly_limit <= 50), updated_at INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_property_usage (username TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, period))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_favorites (username TEXT NOT NULL, source_id TEXT NOT NULL, search_id INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('primary', 'income')), created_at INTEGER NOT NULL, PRIMARY KEY (username, source_id, search_id))"),
+    db.prepare("CREATE INDEX IF NOT EXISTS property_favorites_user_mode_idx ON property_favorites (username, mode, created_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS portfolio_properties (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', apn TEXT NOT NULL DEFAULT '', occupancy TEXT NOT NULL CHECK(occupancy IN ('rented', 'primary', 'secondary', 'vacant')), estimated_value INTEGER NOT NULL DEFAULT 0, money_owed INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '', latitude REAL, longitude REAL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS portfolio_properties_owner_idx ON portfolio_properties (owner, updated_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS portfolio_members (property_id INTEGER NOT NULL, username TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (property_id, username))"),
+    db.prepare("CREATE INDEX IF NOT EXISTS portfolio_members_user_idx ON portfolio_members (username, property_id)"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -84,6 +90,10 @@ async function ensureSchema(db: D1Database) {
   if (!(searchColumns.results ?? []).some((column) => column.name === "last_synced_at")) {
     await db.prepare("ALTER TABLE property_searches ADD COLUMN last_synced_at INTEGER").run();
   }
+  const portfolioColumns = await db.prepare("PRAGMA table_info(portfolio_properties)").all<{ name: string }>();
+  if (!(portfolioColumns.results ?? []).some((column) => column.name === "apn")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN apn TEXT NOT NULL DEFAULT ''").run();
+  if (!(portfolioColumns.results ?? []).some((column) => column.name === "money_owed")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN money_owed INTEGER NOT NULL DEFAULT 0").run();
+  if (!(portfolioColumns.results ?? []).some((column) => column.name === "notes")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN notes TEXT NOT NULL DEFAULT ''").run();
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
   const permissionTime = Date.now();
   await db.batch(["assistant", "lists", "properties"].map((page) => db.prepare("INSERT OR IGNORE INTO user_page_permissions (username, page_key, allowed, updated_at) VALUES ('jessipauli', ?, 1, ?)").bind(page, permissionTime)));
@@ -284,14 +294,111 @@ async function propertyListings(request: Request, env: Env, username: string) {
   const searchIdValue = url.searchParams.get("searchId");
   const requestedSearchId = searchIdValue == null ? null : Number(searchIdValue);
   const searchId = requestedSearchId != null && Number.isInteger(requestedSearchId) ? requestedSearchId : null;
-  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url
-    FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id
-    WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
+  const starredOnly = url.searchParams.get("starred") === "1";
+  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url, CASE WHEN f.username IS NULL THEN 0 ELSE 1 END AS is_favorite
+    FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id LEFT JOIN property_favorites f ON f.username = ? AND f.source_id = l.source_id AND f.search_id = l.search_id
+    WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND (? = 0 OR f.username IS NOT NULL) AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
       AND (l.property_type IS NULL OR (lower(l.property_type) NOT LIKE '%mobile%' AND lower(l.property_type) NOT LIKE '%manufactured%'))
-    ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode, searchId, searchId).all();
+    ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, username, mode, searchId, searchId, starredOnly ? 1 : 0).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
   return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
+}
+
+async function propertyFavorite(request: Request, env: Env, username: string) {
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ sourceId?: string; searchId?: number; favorite?: boolean }>();
+  const sourceId = String(body.sourceId ?? "").trim();
+  const searchId = Number(body.searchId);
+  if (!sourceId || !Number.isInteger(searchId)) return json({ error: "Invalid property." }, 400);
+  const listing = await env.DB.prepare(`SELECT l.mode FROM property_listings l JOIN property_searches s ON s.id = l.search_id
+    WHERE l.source_id = ? AND l.search_id = ? AND (s.owner = ? OR s.owner = 'shared')`)
+    .bind(sourceId, searchId, username).first<{ mode: "primary" | "income" }>();
+  if (!listing) return json({ error: "Property not found." }, 404);
+  if (body.favorite) {
+    await env.DB.prepare("INSERT INTO property_favorites (username, source_id, search_id, mode, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(username, source_id, search_id) DO UPDATE SET mode = excluded.mode")
+      .bind(username, sourceId, searchId, listing.mode, Date.now()).run();
+  } else {
+    await env.DB.prepare("DELETE FROM property_favorites WHERE username = ? AND source_id = ? AND search_id = ?")
+      .bind(username, sourceId, searchId).run();
+  }
+  return json({ ok: true, favorite: Boolean(body.favorite) });
+}
+
+async function geocodeAddress(address: string) {
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(address)}`, { headers: { "user-agent": "PauliHQ/1.0 (private property portfolio)" } });
+    if (!response.ok) return null;
+    const results = await response.json() as Array<{ lat?: string; lon?: string }>;
+    const latitude = Number(results[0]?.lat); const longitude = Number(results[0]?.lon);
+    return Number.isFinite(latitude) && Number.isFinite(longitude) ? { latitude, longitude } : null;
+  } catch { return null; }
+}
+
+async function portfolioUsers(env: Env) {
+  const result = await env.DB.prepare("SELECT username FROM users ORDER BY username").all<{ username: string }>();
+  return json({ users: result.results ?? [] });
+}
+
+async function portfolio(request: Request, env: Env, username: string) {
+  if (request.method === "GET") {
+    const result = await env.DB.prepare(`SELECT p.id, p.owner, p.name, p.address, p.apn, p.occupancy, p.estimated_value, p.money_owed, p.notes, p.latitude, p.longitude, p.updated_at,
+      GROUP_CONCAT(m.username) AS shared_with FROM portfolio_properties p LEFT JOIN portfolio_members m ON m.property_id = p.id
+      WHERE p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members mine WHERE mine.property_id = p.id AND mine.username = ?)
+      GROUP BY p.id ORDER BY p.updated_at DESC`).bind(username, username).all();
+    return json({ properties: result.results ?? [] });
+  }
+  const body = await request.json<{ id?: number; name?: string; address?: string; apn?: string; occupancy?: string; estimatedValue?: number; moneyOwed?: number; notes?: string; sharedWith?: string[] }>();
+  const name = String(body.name ?? "").trim().slice(0, 100);
+  const address = String(body.address ?? "").trim().slice(0, 240);
+  const apn = String(body.apn ?? "").trim().slice(0, 80);
+  const occupancy = ["rented", "primary", "secondary", "vacant"].includes(String(body.occupancy)) ? String(body.occupancy) : "vacant";
+  const estimatedValue = Math.max(0, Math.round(Number(body.estimatedValue) || 0));
+  const moneyOwed = Math.max(0, Math.round(Number(body.moneyOwed) || 0));
+  const notes = String(body.notes ?? "").trim().slice(0, 5_000);
+  const requestedMembers = [...new Set((body.sharedWith ?? []).map((value) => String(value).trim()).filter((value) => value && value !== username))];
+  const validUsers = requestedMembers.length ? await env.DB.prepare(`SELECT username FROM users WHERE username IN (${requestedMembers.map(() => "?").join(",")})`).bind(...requestedMembers).all<{ username: string }>() : { results: [] as Array<{ username: string }> };
+  const members = (validUsers.results ?? []).map((row) => row.username);
+  if (request.method === "POST") {
+    if (!name || (!address && !apn)) return json({ error: "Add a property name and either a full address or APN." }, 400);
+    const coordinates = address ? await geocodeAddress(address) : null;
+    const now = Date.now();
+    const created = await env.DB.prepare("INSERT INTO portfolio_properties (owner, name, address, apn, occupancy, estimated_value, money_owed, notes, latitude, longitude, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(username, name, address, apn, occupancy, estimatedValue, moneyOwed, notes, coordinates?.latitude ?? null, coordinates?.longitude ?? null, now, now).run();
+    const id = Number(created.meta.last_row_id);
+    if (members.length) await env.DB.batch(members.map((member) => env.DB.prepare("INSERT INTO portfolio_members (property_id, username, created_at) VALUES (?, ?, ?)").bind(id, member, now)));
+    return json({ ok: true, id }, 201);
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id)) return json({ error: "Invalid property." }, 400);
+  const owned = await env.DB.prepare("SELECT address FROM portfolio_properties WHERE id = ? AND owner = ?").bind(id, username).first<{ address: string }>();
+  if (!owned) return json({ error: "Only the property owner can make this change." }, 403);
+  if (request.method === "DELETE") {
+    await env.DB.batch([env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id), env.DB.prepare("DELETE FROM portfolio_properties WHERE id = ? AND owner = ?").bind(id, username)]);
+    return json({ ok: true });
+  }
+  if (request.method === "PATCH") {
+    if (!name || (!address && !apn)) return json({ error: "Add a property name and either a full address or APN." }, 400);
+    const coordinates = address && address !== owned.address ? await geocodeAddress(address) : null;
+    await env.DB.prepare("UPDATE portfolio_properties SET name = ?, address = ?, apn = ?, occupancy = ?, estimated_value = ?, money_owed = ?, notes = ?, latitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, latitude) END, longitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, longitude) END, updated_at = ? WHERE id = ? AND owner = ?")
+      .bind(name, address, apn, occupancy, estimatedValue, moneyOwed, notes, address, coordinates?.latitude ?? null, address, coordinates?.longitude ?? null, Date.now(), id, username).run();
+    await env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id).run();
+    if (members.length) await env.DB.batch(members.map((member) => env.DB.prepare("INSERT INTO portfolio_members (property_id, username, created_at) VALUES (?, ?, ?)").bind(id, member, Date.now())));
+    return json({ ok: true });
+  }
+  return json({ error: "Method not allowed." }, 405);
+}
+
+async function portfolioWeather(request: Request, env: Env, username: string) {
+  const id = Number(new URL(request.url).searchParams.get("id"));
+  const property = await env.DB.prepare(`SELECT p.latitude, p.longitude FROM portfolio_properties p WHERE p.id = ? AND
+    (p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members m WHERE m.property_id = p.id AND m.username = ?))`).bind(id, username, username).first<{ latitude: number | null; longitude: number | null }>();
+  if (!property) return json({ error: "Property not found." }, 404);
+  if (property.latitude == null || property.longitude == null) return json({ error: "Weather location unavailable for this address." }, 422);
+  const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${property.latitude}&longitude=${property.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto`);
+  if (!response.ok) return json({ error: "Weather is temporarily unavailable." }, 502);
+  const data = await response.json() as { current?: Record<string, number | string> };
+  return json({ current: data.current ?? {} });
 }
 
 async function aiPropertyQuery(request: Request, env: Env, username: string) {
@@ -771,13 +878,21 @@ const worker = {
         if (!(await pageAccess(env, username, "assistant"))) return json({ error: "You do not have access to Assistant." }, 403);
         return aiHealth(env);
       }
-      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image") {
+      if (url.pathname === "/api/portfolio" || url.pathname === "/api/portfolio-users" || url.pathname === "/api/portfolio-weather") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        if (url.pathname === "/api/portfolio-users" && request.method === "GET") return portfolioUsers(env);
+        if (url.pathname === "/api/portfolio-weather" && request.method === "GET") return portfolioWeather(request, env, username);
+        return portfolio(request, env, username);
+      }
+      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image" || url.pathname === "/api/property-favorites") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (!(await pageAccess(env, username, "properties"))) return json({ error: "You do not have access to Property Finder." }, 403);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
         if (url.pathname === "/api/property-photo" && request.method === "POST") return findPropertyPhoto(request, env, username);
         if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
+        if (url.pathname === "/api/property-favorites") return propertyFavorite(request, env, username);
         if (url.pathname === "/api/properties/query" && request.method === "POST") return aiPropertyQuery(request, env, username);
         if (url.pathname === "/api/properties/sync" && request.method === "POST") {
           ctx.waitUntil(syncPropertyListings(env, true));

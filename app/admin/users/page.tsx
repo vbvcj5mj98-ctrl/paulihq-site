@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import HqMenu from "../../HqMenu";
+import HqHomeLink from "../../HqHomeLink";
 
 type Permissions = Record<"assistant" | "lists" | "properties" | "user_management", boolean>;
 type User = { username: string; created_at: number; permissions?: Permissions; property_limit?: number; property_usage?: number };
@@ -69,7 +69,7 @@ export default function UserManagementPage() {
   }
 
   return <main className="lists-page">
-    <header className="properties-header"><Link href="/portal">← Pauli HQ</Link><HqMenu current="/admin/users" /></header>
+    <header className="properties-header"><HqHomeLink /><HqMenu current="/admin/users" /></header>
     <section className="admin-shell">
       <div className="lists-heading"><p className="kicker">{isOwner ? "Carson admin" : "User management"}</p><h1>User Management</h1><p>Create a login and share the temporary password privately with the new user.</p></div>
       <form className="admin-user-form" onSubmit={createUser}>

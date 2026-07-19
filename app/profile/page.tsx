@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import HqMenu from "../HqMenu";
+import HqHomeLink from "../HqHomeLink";
 
 export default function ProfilePage() {
   const [username, setUsername] = useState("");
@@ -18,7 +18,7 @@ export default function ProfilePage() {
     setSaved(true);
   }
   return <main className="lists-page">
-    <header className="properties-header"><Link href="/portal">← Pauli HQ</Link><HqMenu current="/profile" /></header>
+    <header className="properties-header"><HqHomeLink /><HqMenu current="/profile" /></header>
     <section className="admin-shell">
       <div className="lists-heading"><p className="kicker">{username || "Profile"}</p><h1>Profile</h1><p>Choose how often your saved property searches refresh automatically.</p></div>
       <form className="admin-user-form" onSubmit={save}>
