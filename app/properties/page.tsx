@@ -102,7 +102,7 @@ export default function PropertiesPage() {
         <section className="property-grid">
           {listings.map((listing) => (
             <article className="property-card" key={`${listing.source_id}-${listing.search_label}`}>
-              {listing.image_url ? <a className="property-photo" href={listing.source_page_url} target="_blank" rel="noreferrer"><img src={listing.image_url} alt={`Public listing preview for ${listing.address}`} loading="lazy" referrerPolicy="no-referrer" /></a> : <div className="property-photo placeholder"><span>No photo saved</span></div>}
+              {listing.image_url ? <a className="property-photo" href={listing.source_page_url} target="_blank" rel="noreferrer"><img src={`/api/property-image?sourceId=${encodeURIComponent(listing.source_id)}&searchId=${listing.search_id}`} alt={`Public listing preview for ${listing.address}`} loading="lazy" /></a> : <div className="property-photo placeholder"><span>No photo saved</span></div>}
               <div className="property-card-top"><span>{listing.search_label}</span><small>{listing.ai_score ? `AI ${listing.ai_score}/100` : `${listing.days_on_market ?? "—"} days`}</small></div>
               <h2>{listing.address}</h2>
               <p>{[listing.city, listing.state, listing.zip_code].filter(Boolean).join(", ")}</p>
@@ -111,6 +111,7 @@ export default function PropertiesPage() {
               {listing.ai_summary && <p className="property-ai-summary">{listing.ai_summary}</p>}
               {listing.latitude != null && listing.longitude != null && <button className="map-button" onClick={() => { setSelected(listing); window.scrollTo({ top: 420, behavior: "smooth" }); }}>View on map</button>}
               {!listing.image_url && <button disabled={findingPhoto === listing.source_id} onClick={async () => { setFindingPhoto(listing.source_id); setError(""); const response = await fetch("/api/property-photo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId: listing.source_id, searchId: listing.search_id }) }); const result = await response.json() as { error?: string }; if (!response.ok) setError(result.error || "No usable photo was found."); else await load(); setFindingPhoto(null); }}>{findingPhoto === listing.source_id ? "Finding photo…" : "Find public photo"}</button>}
+              {listing.source_page_url && <a className="listing-link" href={listing.source_page_url} target="_blank" rel="noreferrer">Open listing ↗</a>}
               <button onClick={() => window.location.assign(`/assistant?prompt=${encodeURIComponent(`Analyze this ${mode} property: ${listing.address}, listed at ${listing.price ?? "unknown price"}.`)}`)}>Analyze with AI</button>
             </article>
           ))}

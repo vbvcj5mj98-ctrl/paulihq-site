@@ -244,7 +244,8 @@ async function propertyListings(request: Request, env: Env, username: string) {
   const mode = new URL(request.url).searchParams.get("mode") === "income" ? "income" : "primary";
   const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, c.latitude, c.longitude, m.image_url, m.source_page_url
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id
-    WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode).all();
+    WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (l.mode != 'income' OR COALESCE(json_extract(l.raw_json, '$.hoa.fee'), 0) <= 0)
+    ORDER BY COALESCE(r.score, 0) DESC, l.last_seen_at DESC, l.price ASC LIMIT 50`).bind(username, mode).all();
   const period = new Date().toISOString().slice(0, 7);
   const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
   return json({ listings: result.results ?? [], sourceConnected: Boolean(env.RENTCAST_API_KEY), usage: { requests: usage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
@@ -308,6 +309,25 @@ async function findPropertyPhoto(request: Request, env: Env, username: string) {
   await env.DB.prepare("INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)")
     .bind(sourceId, searchId, imageUrl, finalPage.toString(), Date.now()).run();
   return json({ image_url: imageUrl, source_page_url: finalPage.toString() });
+}
+
+async function propertyImage(request: Request, env: Env, username: string) {
+  const url = new URL(request.url);
+  const sourceId = String(url.searchParams.get("sourceId") ?? "").slice(0, 300);
+  const searchId = Number(url.searchParams.get("searchId"));
+  const media = await env.DB.prepare(`SELECT m.image_url, m.source_page_url FROM property_media m
+    JOIN property_searches s ON s.id = m.search_id WHERE m.source_id = ? AND m.search_id = ? AND (s.owner = ? OR s.owner = 'shared')`)
+    .bind(sourceId, searchId, username).first<{ image_url: string; source_page_url: string }>();
+  if (!media) return new Response("Image not found", { status: 404 });
+  let imageUrl: URL;
+  try {
+    imageUrl = new URL(media.image_url);
+    if (imageUrl.protocol !== "https:" || imageUrl.hostname === "localhost" || /^\d+\.\d+\.\d+\.\d+$/.test(imageUrl.hostname)) throw new Error("Unsupported image host");
+  } catch { return new Response("Unsupported image", { status: 400 }); }
+  const upstream = await fetch(imageUrl.toString(), { headers: { referer: media.source_page_url, "user-agent": "Mozilla/5.0 (compatible; PauliHQ/1.0; private property research)" }, redirect: "follow" });
+  const contentType = upstream.headers.get("content-type") ?? "";
+  if (!upstream.ok || !contentType.startsWith("image/")) return new Response("Image unavailable", { status: 502 });
+  return new Response(upstream.body, { headers: { "content-type": contentType, "cache-control": "private, max-age=86400" } });
 }
 
 async function reserveRentCastRequest(db: D1Database) {
@@ -380,6 +400,8 @@ async function syncPropertyListings(env: Env) {
     const listings = await response.json() as Array<Record<string, unknown>>;
     const now = Date.now();
     for (const item of listings.slice(0, search.id === -100 ? 500 : 100)) {
+      const hoa = item.hoa && typeof item.hoa === "object" ? Number((item.hoa as { fee?: unknown }).fee ?? 0) : 0;
+      if (search.mode === "income" && hoa > 0) continue;
       const sourceId = String(item.id ?? "");
       const address = String(item.formattedAddress ?? "");
       if (!sourceId || !address) continue;
@@ -393,6 +415,7 @@ async function syncPropertyListings(env: Env) {
       }
     }
   }
+  await env.DB.prepare("DELETE FROM property_listings WHERE mode = 'income' AND COALESCE(json_extract(raw_json, '$.hoa.fee'), 0) > 0").run();
   await rankNorthwestArkansas(env);
 }
 
@@ -479,11 +502,12 @@ const worker = {
         if (!username) return json({ error: "Please log in again." }, 401);
         return aiHealth(env);
       }
-      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo") {
+      if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
         if (url.pathname === "/api/property-photo" && request.method === "POST") return findPropertyPhoto(request, env, username);
+        if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
         if (url.pathname === "/api/properties/sync" && request.method === "POST") {
           ctx.waitUntil(syncPropertyListings(env));
           return json({ ok: true, message: "The weekly property scan has started." }, 202);
