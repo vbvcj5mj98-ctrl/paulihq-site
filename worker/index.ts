@@ -69,6 +69,7 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS property_coordinates (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_media (source_id TEXT NOT NULL, search_id INTEGER NOT NULL, image_url TEXT NOT NULL, source_page_url TEXT NOT NULL, found_at INTEGER NOT NULL, PRIMARY KEY (source_id, search_id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS user_preferences (username TEXT PRIMARY KEY, property_refresh TEXT NOT NULL DEFAULT 'weekly' CHECK(property_refresh IN ('weekly', 'daily', 'twice_daily')), updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS user_page_permissions (username TEXT NOT NULL, page_key TEXT NOT NULL CHECK(page_key IN ('assistant', 'lists', 'properties', 'user_management')), allowed INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, page_key))"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -82,6 +83,8 @@ async function ensureSchema(db: D1Database) {
     await db.prepare("ALTER TABLE property_searches ADD COLUMN last_synced_at INTEGER").run();
   }
   await db.prepare("INSERT OR IGNORE INTO property_searches (id, owner, mode, label, city, state, zip_code, min_price, max_price, active, created_at) VALUES (-100, 'shared', 'income', 'Northwest Arkansas Multifamily', 'Bentonville', 'AR', NULL, NULL, 600000, 1, ?)").bind(Date.now()).run();
+  const permissionTime = Date.now();
+  await db.batch(["assistant", "lists", "properties"].map((page) => db.prepare("INSERT OR IGNORE INTO user_page_permissions (username, page_key, allowed, updated_at) VALUES ('jessipauli', ?, 1, ?)").bind(page, permissionTime)));
 }
 
 function json(body: Record<string, unknown>, status = 200, headers?: HeadersInit) {
@@ -98,6 +101,23 @@ async function authenticated(request: Request, env: Env) {
   if (!token) return null;
   const row = await env.DB.prepare("SELECT username FROM sessions WHERE token_hash = ? AND expires_at > ?").bind(await sha256(token), Date.now()).first<{ username: string }>();
   return row?.username ?? null;
+}
+
+const pageKeys = ["assistant", "lists", "properties", "user_management"] as const;
+type PageKey = typeof pageKeys[number];
+
+async function pageAccess(env: Env, username: string, page: PageKey) {
+  if (username === "carsonpauli") return true;
+  const permission = await env.DB.prepare("SELECT allowed FROM user_page_permissions WHERE username = ? AND page_key = ?").bind(username, page).first<{ allowed: number }>();
+  return permission?.allowed === 1;
+}
+
+async function permissionsFor(env: Env, username: string) {
+  if (username === "carsonpauli") return Object.fromEntries(pageKeys.map((page) => [page, true]));
+  const result = await env.DB.prepare("SELECT page_key, allowed FROM user_page_permissions WHERE username = ?").bind(username).all<{ page_key: string; allowed: number }>();
+  const permissions = Object.fromEntries(pageKeys.map((page) => [page, false])) as Record<string, boolean>;
+  for (const row of result.results ?? []) permissions[row.page_key] = row.allowed === 1;
+  return permissions;
 }
 
 function responseText(payload: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
@@ -225,8 +245,8 @@ async function simplifyList(request: Request, env: Env, username: string) {
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
       instructions: kind === "grocery"
-        ? "Convert the request into a concise grocery list while staying strictly grounded in what the user said. Preserve requested items and clearly implied ingredients only. Do not add complementary products, brands, quantities, meal ideas, pantry staples, or guesses. If the request is already a simple item, return it essentially unchanged. Return one item per line with no bullets, headings, or commentary. Prefer fewer accurate items over a more complete-looking list."
-        : "Turn the request into a short, practical checklist while staying strictly grounded in what the user said. You may split a stated goal into only the minimum steps that are directly necessary or clearly implied. Preserve the user's wording and level of detail when possible. Do not add planning, research, purchasing, scheduling, cleanup, follow-up, or other tasks unless the user mentioned or necessarily implied them. If the request is already one checkable task, return one task. Return one task per line with no bullets, headings, or commentary. Prefer fewer accurate tasks over an elaborate plan.",
+        ? "Convert the request into a concise grocery list while staying strictly grounded in what the user said. Correct spelling, capitalization, and grammar without changing meaning. Preserve requested items and clearly implied ingredients only. Do not add complementary products, brands, quantities, meal ideas, pantry staples, or guesses. If the request is already a simple item, return it with only necessary language corrections. Return one item per line with no bullets, headings, or commentary. Prefer fewer accurate items over a more complete-looking list."
+        : "Turn the request into a short, practical checklist while staying strictly grounded in what the user said. Correct spelling, capitalization, and grammar without changing meaning. You may split a stated goal into only the minimum steps that are directly necessary or clearly implied. Preserve the user's wording and level of detail when possible. Do not add planning, research, purchasing, scheduling, cleanup, follow-up, or other tasks unless the user mentioned or necessarily implied them. If the request is already one checkable task, return one corrected task. Return one task per line with no bullets, headings, or commentary. Prefer fewer accurate tasks over an elaborate plan.",
       input,
     }),
   });
@@ -567,7 +587,7 @@ async function logout(request: Request, env: Env) {
 }
 
 async function adminUsers(request: Request, env: Env, username: string) {
-  if (username !== "carsonpauli") return json({ error: "Only Carson can manage user accounts." }, 403);
+  if (!(await pageAccess(env, username, "user_management"))) return json({ error: "You do not have access to user management." }, 403);
   if (request.method === "GET") {
     const result = await env.DB.prepare("SELECT username, created_at FROM users ORDER BY created_at ASC").all();
     return json({ users: result.results ?? [] });
@@ -585,6 +605,24 @@ async function adminUsers(request: Request, env: Env, username: string) {
   await env.DB.prepare("INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)")
     .bind(newUsername, bytesToBase64(hash), bytesToBase64(salt), Date.now()).run();
   return json({ ok: true, username: newUsername }, 201);
+}
+
+async function adminAccess(request: Request, env: Env, username: string) {
+  if (username !== "carsonpauli") return json({ error: "Only Carson can change page access." }, 403);
+  if (request.method === "GET") {
+    const users = await env.DB.prepare("SELECT username, created_at FROM users ORDER BY created_at ASC").all<{ username: string; created_at: number }>();
+    const permissions = await env.DB.prepare("SELECT username, page_key, allowed FROM user_page_permissions").all<{ username: string; page_key: string; allowed: number }>();
+    return json({ users: (users.results ?? []).map((user) => ({ ...user, permissions: user.username === "carsonpauli" ? Object.fromEntries(pageKeys.map((page) => [page, true])) : Object.fromEntries(pageKeys.map((page) => [page, (permissions.results ?? []).some((item) => item.username === user.username && item.page_key === page && item.allowed === 1)])) })) });
+  }
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const body = await request.json<{ username?: string; permissions?: Record<string, boolean> }>();
+  const target = String(body.username ?? "").trim().toLowerCase();
+  if (!target || target === "carsonpauli") return json({ error: "Carson's owner access cannot be changed." }, 400);
+  const user = await env.DB.prepare("SELECT username FROM users WHERE username = ?").bind(target).first();
+  if (!user) return json({ error: "User not found." }, 404);
+  const now = Date.now();
+  await env.DB.batch(pageKeys.map((page) => env.DB.prepare("INSERT INTO user_page_permissions (username, page_key, allowed, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(username, page_key) DO UPDATE SET allowed=excluded.allowed, updated_at=excluded.updated_at").bind(target, page, body.permissions?.[page] ? 1 : 0, now)));
+  return json({ ok: true });
 }
 
 async function profileSettings(request: Request, env: Env, username: string) {
@@ -623,12 +661,17 @@ const worker = {
       if (url.pathname === "/api/me") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
-        return json({ username, isAdmin: username === "carsonpauli" });
+        return json({ username, isAdmin: username === "carsonpauli", permissions: await permissionsFor(env, username) });
       }
       if (url.pathname === "/api/admin/users") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         return adminUsers(request, env, username);
+      }
+      if (url.pathname === "/api/admin/access") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        return adminAccess(request, env, username);
       }
       if (url.pathname === "/api/profile") {
         const username = await authenticated(request, env);
@@ -638,6 +681,7 @@ const worker = {
       if (url.pathname.startsWith("/api/chat")) {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
+        if (!(await pageAccess(env, username, "assistant"))) return json({ error: "You do not have access to Assistant." }, 403);
         if (request.method === "GET") return chatHistory(env, username);
         if (request.method === "POST") return chat(request, env, username);
         return json({ error: "Method not allowed." }, 405);
@@ -645,11 +689,13 @@ const worker = {
       if (url.pathname === "/api/ai-health") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
+        if (!(await pageAccess(env, username, "assistant"))) return json({ error: "You do not have access to Assistant." }, 403);
         return aiHealth(env);
       }
       if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image") {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
+        if (!(await pageAccess(env, username, "properties"))) return json({ error: "You do not have access to Property Finder." }, 403);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
         if (url.pathname === "/api/property-photo" && request.method === "POST") return findPropertyPhoto(request, env, username);
         if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
@@ -664,16 +710,28 @@ const worker = {
       if (url.pathname === "/api/list-items" || url.pathname === "/api/lists/simplify" || url.pathname.startsWith("/api/list-items/")) {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
+        if (!(await pageAccess(env, username, "lists"))) return json({ error: "You do not have access to Lists." }, 403);
         if (url.pathname === "/api/list-items") return listItems(request, env, username);
         if (url.pathname === "/api/lists/simplify" && request.method === "POST") return simplifyList(request, env, username);
         const id = Number(url.pathname.split("/").pop());
         if (!Number.isInteger(id)) return json({ error: "Invalid list item." }, 400);
         return updateListItem(request, env, username, id);
       }
-      if (url.pathname.startsWith("/admin") || url.pathname.startsWith("/profile")) {
+      if (url.pathname.startsWith("/profile")) {
         const username = await authenticated(request, env);
         if (!username) return Response.redirect(new URL("/login", request.url), 302);
         if (username !== "carsonpauli") return Response.redirect(new URL("/portal", request.url), 302);
+      }
+      if (url.pathname.startsWith("/admin/users")) {
+        const username = await authenticated(request, env);
+        if (!username) return Response.redirect(new URL("/login", request.url), 302);
+        if (!(await pageAccess(env, username, "user_management"))) return Response.redirect(new URL("/portal", request.url), 302);
+      }
+      if (url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists")) {
+        const username = await authenticated(request, env);
+        if (!username) return Response.redirect(new URL("/login", request.url), 302);
+        const page: PageKey = url.pathname.startsWith("/assistant") ? "assistant" : url.pathname.startsWith("/properties") ? "properties" : "lists";
+        if (!(await pageAccess(env, username, page))) return Response.redirect(new URL("/portal", request.url), 302);
       }
       if ((url.pathname.startsWith("/portal") || url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists") || url.pathname.startsWith("/profile")) && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
     } catch (error) {

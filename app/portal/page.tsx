@@ -4,15 +4,16 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const spaces = [
-  { title: "Assistant", href: "/assistant" },
-  { title: "Lists", href: "/lists" },
-  { title: "Property Finder", href: "/properties" },
+  { key: "assistant", title: "Assistant", href: "/assistant" },
+  { key: "lists", title: "Lists", href: "/lists" },
+  { key: "properties", title: "Property Finder", href: "/properties" },
 ];
 
 export default function PortalPage() {
   const [isAdmin, setIsAdmin] = useState(false);
-  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { isAdmin?: boolean }) => setIsAdmin(Boolean(result.isAdmin))).catch(() => undefined); }, []);
-  const visibleSpaces = isAdmin ? [...spaces, { title: "Profile", href: "/profile" }, { title: "User Management", href: "/admin/users" }] : spaces;
+  const [permissions, setPermissions] = useState<Record<string, boolean>>({});
+  useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { isAdmin?: boolean; permissions?: Record<string, boolean> }) => { setIsAdmin(Boolean(result.isAdmin)); setPermissions(result.permissions ?? {}); }).catch(() => undefined); }, []);
+  const visibleSpaces = [...spaces.filter((space) => permissions[space.key]), ...(isAdmin ? [{ key: "profile", title: "Profile", href: "/profile" }] : []), ...(permissions.user_management ? [{ key: "user_management", title: "User Management", href: "/admin/users" }] : [])];
   return (
     <main className="hq-page">
       <header className="hq-header">
