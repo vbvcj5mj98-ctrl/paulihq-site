@@ -414,9 +414,9 @@ async function portfolioValuation(request: Request, env: Env) {
   const addressKey = address.toLowerCase().replace(/\s+/g, " ");
   const cached = await env.DB.prepare("SELECT formatted_address, estimated_value, range_low, range_high, latitude, longitude, refreshed_at FROM property_valuation_cache WHERE address_key = ? AND refreshed_at > ?").bind(addressKey, Date.now() - 30 * 24 * 60 * 60_000).first<{ formatted_address: string; estimated_value: number; range_low: number | null; range_high: number | null; latitude: number | null; longitude: number | null; refreshed_at: number }>();
   if (cached) return json({ address: cached.formatted_address, estimatedValue: cached.estimated_value, rangeLow: cached.range_low, rangeHigh: cached.range_high, latitude: cached.latitude, longitude: cached.longitude, cached: true });
-  if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
   const params = new URLSearchParams({ address, compCount: "5", lookupSubjectAttributes: "true" });
-  const response = await fetch(`https://api.rentcast.io/v1/avm/value?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const response = await rentCastFetch(env, `https://api.rentcast.io/v1/avm/value?${params}`);
+  if (!response) return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
   const payload = await response.json() as { price?: number; priceRangeLow?: number; priceRangeHigh?: number; subjectProperty?: { formattedAddress?: string; latitude?: number; longitude?: number }; message?: string };
   if (!response.ok || !Number.isFinite(Number(payload.price))) return json({ error: "No automatic value estimate was available for that address." }, 422);
   const formattedAddress = String(payload.subjectProperty?.formattedAddress || address).replace(/, USA$/, "");
@@ -602,13 +602,19 @@ function setWhenMissing(target: Record<string, unknown>, key: string, value: unk
 
 async function enrichResearchWithRentCast(result: PropertyResearchResult, env: Env, fallbackAddress: string) {
   const address = String(result.identity?.address ?? fallbackAddress).trim();
-  if (!address || !env.RENTCAST_API_KEY || !(await reserveRentCastRequest(env.DB))) return result;
+  if (!address || !env.RENTCAST_API_KEY) return result;
   const params = new URLSearchParams({ address, limit: "1" });
-  const response = await fetch(`https://api.rentcast.io/v1/properties?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const response = await rentCastFetch(env, `https://api.rentcast.io/v1/properties?${params}`);
+  if (!response) {
+    const ownership = result.ownership ?? (result.ownership = {});
+    setWhenMissing(ownership, "search_summary", "RentCast enrichment was skipped because the site's 50-request monthly property-data limit has been reached.");
+    return result;
+  }
   const payload = await response.json() as Array<Record<string, unknown>> | { message?: string };
   const record = Array.isArray(payload) ? payload[0] : null;
   if (!response.ok || !record) return result;
   const identity = result.identity ?? (result.identity = {});
+  const ownership = result.ownership ?? (result.ownership = {});
   const property = result.property ?? (result.property = {});
   const financial = result.financial ?? (result.financial = {});
   const legal = result.legal ?? (result.legal = {});
@@ -629,6 +635,29 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   setWhenMissing(financial, "last_sale_date", record.lastSaleDate);
   setWhenMissing(legal, "legal_description", record.legalDescription);
   setWhenMissing(legal, "zoning", record.zoning);
+  const owner = record.owner as { names?: unknown[]; type?: unknown; ownerOccupied?: unknown } | undefined;
+  const ownerNames = Array.isArray(owner?.names) ? owner.names.map((name) => String(name).trim()).filter(Boolean).slice(0, 10) : [];
+  if (ownerNames.length > 0) {
+    setWhenMissing(ownership, "owner_name", ownerNames[0]);
+    if (!Array.isArray(ownership.additional_owners) || ownership.additional_owners.length === 0) ownership.additional_owners = ownerNames.slice(1);
+    setWhenMissing(ownership, "owner_type", owner?.type);
+    setWhenMissing(ownership, "ownership_confidence", "medium");
+    setWhenMissing(ownership, "ownership_source_tier", "structured public-record provider");
+    if (typeof ownership.official_record_found !== "boolean") ownership.official_record_found = false;
+    ownership.secondary_record_found = true;
+    setWhenMissing(ownership, "search_summary", "RentCast returned current owner details from its normalized property-record data. The name is retained while Parcel Scout attempts to confirm it against an official county or recorder source.");
+    setWhenMissing(ownership, "ownership_notes", typeof owner?.ownerOccupied === "boolean" ? `RentCast owner-occupied indicator: ${owner.ownerOccupied ? "yes" : "no"}.` : null);
+    const ownerEvidence = Array.isArray(ownership.evidence) ? ownership.evidence as Array<Record<string, unknown>> : [];
+    if (!ownerEvidence.some((item) => item.source_kind === "structured property record")) ownerEvidence.unshift({
+      source_kind: "structured property record",
+      name: ownerNames.join(" & "),
+      record_date: null,
+      title: "RentCast current owner record",
+      url: "https://developers.rentcast.io/reference/property-data-schema",
+      supports: "Current owner name and entity type returned for the exact address",
+    });
+    ownership.evidence = ownerEvidence.slice(0, 10);
+  }
   const assessments = record.taxAssessments as Record<string, { value?: number; land?: number; improvements?: number }> | undefined;
   const taxes = record.propertyTaxes as Record<string, { total?: number } | number> | undefined;
   const assessment = latestYearValue(assessments);
@@ -639,7 +668,7 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   setWhenMissing(financial, "assessment_year", assessment?.year);
   setWhenMissing(financial, "annual_tax", typeof tax?.value === "number" ? tax.value : tax?.value?.total);
   setWhenMissing(financial, "tax_year", tax?.year);
-  result.sources = [...(result.sources ?? []), { title: "RentCast property record", url: "https://www.rentcast.io/", supports: ["structured property characteristics", "assessment and tax history when available"] }];
+  result.sources = [...(result.sources ?? []), { title: "RentCast property record", url: "https://developers.rentcast.io/reference/property-data-schema", supports: ["current owner name and entity type when available", "structured property characteristics", "assessment and tax history"] }];
   return result;
 }
 
@@ -1102,7 +1131,8 @@ async function propertyResearch(request: Request, env: Env, username: string) {
     const rows = await env.DB.prepare("SELECT id, query_type, query_text, county, state, result_json, starred, refreshed_at FROM property_researches WHERE owner = ? AND (starred = 1 OR refreshed_at > ?) ORDER BY starred DESC, refreshed_at DESC LIMIT 100").bind(username, Date.now() - 90 * 24 * 60 * 60_000).all<{ id: number; query_type: string; query_text: string; county: string; state: string; result_json: string; starred: number; refreshed_at: number }>();
     const period = new Date().toISOString().slice(0, 7);
     const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'property_research' AND period = ?").bind(period).first<{ requests: number }>();
-    return json({ researches: (rows.results ?? []).map((row) => ({ ...row, result: JSON.parse(row.result_json), result_json: undefined })), usage: { requests: usage?.requests ?? 0, limit: monthlyPropertyResearchLimit, period } });
+    const rentCastUsage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'rentcast' AND period = ?").bind(period).first<{ requests: number }>();
+    return json({ researches: (rows.results ?? []).map((row) => ({ ...row, result: JSON.parse(row.result_json), result_json: undefined })), usage: { requests: usage?.requests ?? 0, limit: monthlyPropertyResearchLimit, period }, rentCastUsage: { requests: rentCastUsage?.requests ?? 0, limit: monthlyRentCastRequestLimit, period } });
   }
   const body = await request.json<{ id?: number; queryType?: string; queryText?: string; county?: string; state?: string; force?: boolean; starred?: boolean }>();
   if (request.method === "PATCH") {
@@ -1278,11 +1308,6 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   if (!address && !city && !state && !zipCode) return json({ error: "Please include a city, state, ZIP code, or property address." }, 400);
   const userReservation = await reserveUserPropertyRequest(env.DB, username);
   if (!userReservation.ok) return json({ error: `Your monthly Property Finder limit of ${userReservation.limit} request${userReservation.limit === 1 ? "" : "s"} has been reached.` }, 429);
-  if (!(await reserveRentCastRequest(env.DB))) {
-    await env.DB.prepare("UPDATE user_property_usage SET requests = MAX(0, requests - 1), updated_at = ? WHERE username = ? AND period = ?").bind(Date.now(), username, userReservation.period).run();
-    return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
-  }
-
   const allowedTypes = new Set(["Single Family", "Condo", "Townhouse", "Multi-Family", "Apartment", "Land"]);
   const propertyTypes = (filters.property_types ?? []).filter((type) => allowedTypes.has(type));
   const params = new URLSearchParams({ status: "Active", limit: "500" });
@@ -1294,7 +1319,11 @@ async function aiPropertyQuery(request: Request, env: Env, username: string) {
   if (filters.min_bedrooms != null) params.set("bedrooms", `${Math.max(0, Number(filters.min_bedrooms) || 0)}:*`);
   if (filters.min_bathrooms != null) params.set("bathrooms", `${Math.max(0, Number(filters.min_bathrooms) || 0)}:*`);
   if (minLotSquareFeet > 0) params.set("lotSize", `${minLotSquareFeet}:*`);
-  const feedResponse = await fetch(`https://api.rentcast.io/v1/listings/sale?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const feedResponse = await rentCastFetch(env, `https://api.rentcast.io/v1/listings/sale?${params}`);
+  if (!feedResponse) {
+    await env.DB.prepare("UPDATE user_property_usage SET requests = MAX(0, requests - 1), updated_at = ? WHERE username = ? AND period = ?").bind(Date.now(), username, userReservation.period).run();
+    return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
+  }
   if (!feedResponse.ok) return json({ error: "The property service could not complete that search. Try a broader location or fewer filters." }, 502);
   const feedListings = await feedResponse.json() as Array<Record<string, unknown>>;
   const label = String(filters.label || prompt).trim().slice(0, 80);
@@ -1426,6 +1455,12 @@ async function reserveRentCastRequest(db: D1Database) {
   return Number(reservation.meta.changes ?? 0) === 1;
 }
 
+async function rentCastFetch(env: Env, url: string) {
+  if (!env.RENTCAST_API_KEY || !url.startsWith("https://api.rentcast.io/")) return null;
+  if (!(await reserveRentCastRequest(env.DB))) return null;
+  return fetch(url, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+}
+
 async function reservePropertyResearchRequest(db: D1Database) {
   const period = new Date().toISOString().slice(0, 7);
   await db.prepare("INSERT OR IGNORE INTO api_usage (service, period, requests, updated_at) VALUES ('property_research', ?, 0, ?)").bind(period, Date.now()).run();
@@ -1531,11 +1566,6 @@ async function syncPropertyListings(env: Env, force = false) {
   for (const search of searchResult.results ?? []) {
     const refreshInterval = search.refresh_frequency === "twice_daily" ? 12 * 60 * 60_000 : search.refresh_frequency === "daily" ? 24 * 60 * 60_000 : 7 * 24 * 60 * 60_000;
     if (!force && search.last_synced_at && Date.now() - search.last_synced_at < refreshInterval) continue;
-    const reserved = await reserveRentCastRequest(env.DB);
-    if (!reserved) {
-      console.log("RentCast monthly request limit reached; property sync stopped.");
-      break;
-    }
     const params = new URLSearchParams({ limit: search.id === -100 ? "500" : "100", status: "Active" });
     if (search.id === -100) {
       params.set("address", "Bentonville, AR");
@@ -1548,7 +1578,11 @@ async function syncPropertyListings(env: Env, force = false) {
       if (search.state) params.set("state", search.state);
     }
     if (search.id !== -100 && (search.min_price || search.max_price)) params.set("price", `${search.min_price ?? "*"}:${search.max_price ?? "*"}`);
-    const response = await fetch(`https://api.rentcast.io/v1/listings/sale?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+    const response = await rentCastFetch(env, `https://api.rentcast.io/v1/listings/sale?${params}`);
+    if (!response) {
+      console.log("RentCast monthly request limit reached; property sync stopped.");
+      break;
+    }
     if (!response.ok) {
       console.error("Property feed request failed", search.id, response.status);
       continue;

@@ -50,6 +50,7 @@ export default function ParcelScoutPage() {
   const [researches, setResearches] = useState<Research[]>([]);
   const [current, setCurrent] = useState<Research | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 20, period: "" });
+  const [rentCastUsage, setRentCastUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [addressBusy, setAddressBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -60,9 +61,9 @@ export default function ParcelScoutPage() {
   const loadHistory = useCallback(async () => {
     const response = await fetch("/api/property-research");
     if (response.status === 401) return window.location.assign("/login");
-    const data = await response.json() as { researches?: Research[]; usage?: Usage; error?: string };
+    const data = await response.json() as { researches?: Research[]; usage?: Usage; rentCastUsage?: Usage; error?: string };
     if (!response.ok) throw new Error(data.error || "Unable to load Parcel Scout.");
-    setResearches(data.researches ?? []); if (data.usage) setUsage(data.usage);
+    setResearches(data.researches ?? []); if (data.usage) setUsage(data.usage); if (data.rentCastUsage) setRentCastUsage(data.rentCastUsage);
   }, []);
 
   useEffect(() => { loadHistory().catch((reason: Error) => setError(reason.message)); }, [loadHistory]);
@@ -143,7 +144,7 @@ export default function ParcelScoutPage() {
         <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<div className="scout-address-field"><input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder={queryType === "apn" ? "Enter the complete APN" : "Start typing a property address…"} required />{addressBusy && <span>Selecting…</span>}{queryType === "address" && suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
         {queryType === "apn" && <><label>County<input value={county} onChange={(event) => setCounty(event.target.value)} placeholder="Benton" required /></label><label>State<input value={state} onChange={(event) => setState(event.target.value.toUpperCase())} placeholder="AR" maxLength={2} required /></label></>}
         <button className="scout-submit" type="submit" disabled={busy}>{busy ? "Investigating…" : "Scout property"}</button>
-        <small>New investigations start unstarred. Unstarred reports are cached for 90 days; starred reports stay saved until you unstar them. {usage.requests} of {usage.limit} new investigations used this month.</small>
+        <small>New investigations start unstarred. Unstarred reports are cached for 90 days; starred reports stay saved until you unstar them. AI investigations: {usage.requests} of {usage.limit} this month. RentCast requests across all Pauli HQ property features: {rentCastUsage.requests} of {rentCastUsage.limit} this month.</small>
       </form>
       {error && <p className="property-error" role="alert">{error}</p>}
 
