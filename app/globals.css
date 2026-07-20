@@ -374,6 +374,9 @@ a { color: inherit; text-decoration: none; }
 .scout-form label { display: grid; gap: 7px; color: #686a63; font-size: .7rem; }
 .scout-form input { width: 100%; min-width: 0; height: 50px; padding: 0 13px; border: 1px solid #aaa89f; background: #f7f5ef; color: #1b2929; font: inherit; outline: none; }
 .scout-form input:focus { border-color: #1b2929; box-shadow: 0 0 0 3px rgba(27,41,41,.07); }
+.scout-address-field { position: relative; }
+.scout-address-field > span { position: absolute; top: 18px; right: 12px; color: #777970; font-size: .66rem; }
+.scout-address-field .address-suggestions { top: calc(100% + 4px); }
 .scout-submit { min-height: 50px; align-self: end; padding: 0 22px; border: 0; background: #8d704f; color: white; font: inherit; cursor: pointer; }
 .scout-submit:disabled { opacity: .55; cursor: wait; }
 .scout-form > small { grid-column: 1 / -1; color: #777970; font-size: .65rem; line-height: 1.45; }

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import HqHomeLink from "../HqHomeLink";
 import HqMenu from "../HqMenu";
 
@@ -19,6 +19,7 @@ type ResearchResult = {
 
 type Research = { id: number; query_type: "address" | "apn"; query_text: string; county: string; state: string; starred: number | boolean; refreshed_at: number; result: ResearchResult };
 type Usage = { requests: number; limit: number; period: string };
+type AddressSuggestion = { placeId: string; text: string };
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
@@ -44,8 +45,12 @@ export default function ParcelScoutPage() {
   const [researches, setResearches] = useState<Research[]>([]);
   const [current, setCurrent] = useState<Research | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 20, period: "" });
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
+  const [addressBusy, setAddressBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const sessionToken = useRef(crypto.randomUUID());
+  const suppressSuggestions = useRef(false);
 
   const loadHistory = useCallback(async () => {
     const response = await fetch("/api/property-research");
@@ -56,6 +61,28 @@ export default function ParcelScoutPage() {
   }, []);
 
   useEffect(() => { loadHistory().catch((reason: Error) => setError(reason.message)); }, [loadHistory]);
+
+  useEffect(() => {
+    if (queryType !== "address" || queryText.trim().length < 4 || suppressSuggestions.current) { suppressSuggestions.current = false; setSuggestions([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch("/api/address-autocomplete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: queryText, sessionToken: sessionToken.current }), signal: controller.signal });
+        const data = await response.json() as { suggestions?: AddressSuggestion[] };
+        setSuggestions(response.ok ? data.suggestions ?? [] : []);
+      } catch { if (!controller.signal.aborted) setSuggestions([]); }
+    }, 350);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [queryText, queryType]);
+
+  async function chooseAddress(suggestion: AddressSuggestion) {
+    setAddressBusy(true); setSuggestions([]); setError("");
+    const response = await fetch("/api/address-details", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ placeId: suggestion.placeId, sessionToken: sessionToken.current }) });
+    const data = await response.json() as { address?: string; error?: string };
+    if (!response.ok || !data.address) setError(data.error || "Unable to select that address.");
+    else { suppressSuggestions.current = true; setQueryText(data.address); sessionToken.current = crypto.randomUUID(); }
+    setAddressBusy(false);
+  }
 
   async function investigate(event?: FormEvent<HTMLFormElement>, force = false) {
     event?.preventDefault(); setBusy(true); setError("");
@@ -70,7 +97,7 @@ export default function ParcelScoutPage() {
   }
 
   function openResearch(research: Research) {
-    setCurrent(research); setQueryType(research.query_type); setQueryText(research.query_text); setCounty(research.county); setState(research.state); setError(""); window.scrollTo({ top: 0, behavior: "smooth" });
+    setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setError(""); window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function toggleStar() {
@@ -101,8 +128,8 @@ export default function ParcelScoutPage() {
     <section className="scout-shell">
       <div className="scout-heading"><p className="kicker">Public-record property research</p><h1>Parcel Scout</h1><p>Enter an address or APN. Parcel Scout checks public assessor records, tax and GIS pages, listing sources, and available structured property data.</p></div>
       <form className="scout-form" onSubmit={(event) => investigate(event)}>
-        <div className="scout-type" role="group" aria-label="Lookup type"><button type="button" className={queryType === "address" ? "active" : ""} onClick={() => setQueryType("address")}>Address</button><button type="button" className={queryType === "apn" ? "active" : ""} onClick={() => setQueryType("apn")}>APN</button></div>
-        <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder={queryType === "apn" ? "Enter the complete APN" : "Enter a complete street address"} required /></label>
+        <div className="scout-type" role="group" aria-label="Lookup type"><button type="button" className={queryType === "address" ? "active" : ""} onClick={() => { setQueryType("address"); setSuggestions([]); sessionToken.current = crypto.randomUUID(); }}>Address</button><button type="button" className={queryType === "apn" ? "active" : ""} onClick={() => { setQueryType("apn"); setSuggestions([]); }}>APN</button></div>
+        <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<div className="scout-address-field"><input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder={queryType === "apn" ? "Enter the complete APN" : "Start typing a property address…"} required />{addressBusy && <span>Selecting…</span>}{queryType === "address" && suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
         {queryType === "apn" && <><label>County<input value={county} onChange={(event) => setCounty(event.target.value)} placeholder="Benton" required /></label><label>State<input value={state} onChange={(event) => setState(event.target.value.toUpperCase())} placeholder="AR" maxLength={2} required /></label></>}
         <button className="scout-submit" type="submit" disabled={busy}>{busy ? "Investigating…" : "Scout property"}</button>
         <small>New investigations start unstarred. Unstarred reports are cached for 90 days; starred reports stay saved until you unstar them. {usage.requests} of {usage.limit} new investigations used this month.</small>
