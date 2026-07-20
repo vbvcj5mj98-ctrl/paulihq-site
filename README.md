@@ -23,3 +23,9 @@ The approved usernames are `carsonpauli` and `jessipauli`. Passwords are never c
 Passwords are salted and hashed with PBKDF2. Failed login attempts are rate-limited, and sessions use random tokens stored in D1 with secure HTTP-only cookies.
 
 Never commit passwords, the setup code, API keys, or other secrets to this repository.
+
+## Parcel Scout and nationwide APN lookup
+
+Parcel Scout researches an address or APN using the existing OpenAI web-search connection and enriches results with RentCast when available. APN searches require county and two-letter state because parcel numbers are commonly reused in different jurisdictions.
+
+Unstarred lookups are cached for 90 days. Starred properties remain saved until the user removes the star. The site enforces a maximum of 20 new AI property investigations per calendar month; cached results do not use that allowance. No Regrid account or secret is required.

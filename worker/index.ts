@@ -19,6 +19,7 @@ const encoder = new TextEncoder();
 const approvedUsers = new Set(["carsonpauli", "jessipauli"]);
 const passwordHashIterations = 30_000;
 const monthlyRentCastRequestLimit = 50;
+const monthlyPropertyResearchLimit = 20;
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -75,12 +76,14 @@ async function ensureSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS user_property_usage (username TEXT NOT NULL, period TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (username, period))"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_favorites (username TEXT NOT NULL, source_id TEXT NOT NULL, search_id INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('primary', 'income')), created_at INTEGER NOT NULL, PRIMARY KEY (username, source_id, search_id))"),
     db.prepare("CREATE INDEX IF NOT EXISTS property_favorites_user_mode_idx ON property_favorites (username, mode, created_at)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS portfolio_properties (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', apn TEXT NOT NULL DEFAULT '', occupancy TEXT NOT NULL CHECK(occupancy IN ('rented', 'primary', 'secondary', 'vacant')), estimated_value INTEGER NOT NULL DEFAULT 0, money_owed INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '', latitude REAL, longitude REAL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS portfolio_properties (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', apn TEXT NOT NULL DEFAULT '', county TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', occupancy TEXT NOT NULL CHECK(occupancy IN ('rented', 'primary', 'secondary', 'vacant')), estimated_value INTEGER NOT NULL DEFAULT 0, money_owed INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '', latitude REAL, longitude REAL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS portfolio_properties_owner_idx ON portfolio_properties (owner, updated_at)"),
     db.prepare("CREATE TABLE IF NOT EXISTS portfolio_members (property_id INTEGER NOT NULL, username TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (property_id, username))"),
     db.prepare("CREATE INDEX IF NOT EXISTS portfolio_members_user_idx ON portfolio_members (username, property_id)"),
     db.prepare("CREATE TABLE IF NOT EXISTS property_valuation_cache (address_key TEXT PRIMARY KEY, formatted_address TEXT NOT NULL, estimated_value INTEGER NOT NULL, range_low INTEGER, range_high INTEGER, latitude REAL, longitude REAL, refreshed_at INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS portfolio_parcel_data (property_id INTEGER PRIMARY KEY, assessor_id TEXT, assessed_value INTEGER, land_value INTEGER, improvement_value INTEGER, assessment_year INTEGER, annual_tax INTEGER, tax_year INTEGER, legal_description TEXT, zoning TEXT, last_sale_price INTEGER, last_sale_date TEXT, refreshed_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS property_researches (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, lookup_key TEXT NOT NULL, query_type TEXT NOT NULL CHECK(query_type IN ('address', 'apn')), query_text TEXT NOT NULL, county TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL, starred INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, refreshed_at INTEGER NOT NULL, UNIQUE(owner, lookup_key))"),
+    db.prepare("CREATE INDEX IF NOT EXISTS property_researches_owner_time_idx ON property_researches (owner, refreshed_at DESC)"),
   ]);
   const listColumns = await db.prepare("PRAGMA table_info(list_items)").all<{ name: string }>();
   if (!(listColumns.results ?? []).some((column) => column.name === "assignee")) {
@@ -100,6 +103,8 @@ async function ensureSchema(db: D1Database) {
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "apn")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN apn TEXT NOT NULL DEFAULT ''").run();
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "money_owed")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN money_owed INTEGER NOT NULL DEFAULT 0").run();
   if (!(portfolioColumns.results ?? []).some((column) => column.name === "notes")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN notes TEXT NOT NULL DEFAULT ''").run();
+  if (!(portfolioColumns.results ?? []).some((column) => column.name === "county")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN county TEXT NOT NULL DEFAULT ''").run();
+  if (!(portfolioColumns.results ?? []).some((column) => column.name === "state")) await db.prepare("ALTER TABLE portfolio_properties ADD COLUMN state TEXT NOT NULL DEFAULT ''").run();
   const rankingColumns = await db.prepare("PRAGMA table_info(property_ai_rankings)").all<{ name: string }>();
   if (!(rankingColumns.results ?? []).some((column) => column.name === "estimated_monthly_income")) await db.prepare("ALTER TABLE property_ai_rankings ADD COLUMN estimated_monthly_income INTEGER").run();
   if (!(rankingColumns.results ?? []).some((column) => column.name === "estimated_roi")) await db.prepare("ALTER TABLE property_ai_rankings ADD COLUMN estimated_roi REAL").run();
@@ -425,82 +430,259 @@ async function portfolioUsers(env: Env) {
   return json({ users: result.results ?? [] });
 }
 
-type ParcelRecord = {
-  assessorID?: string;
-  legalDescription?: string;
-  zoning?: string;
-  lastSalePrice?: number;
-  lastSaleDate?: string;
-  taxAssessments?: Record<string, { value?: number; land?: number; improvements?: number }>;
-  propertyTaxes?: Record<string, { total?: number } | number>;
-};
-
 function latestYearValue<T>(values?: Record<string, T>) {
   const years = Object.keys(values ?? {}).filter((year) => /^\d{4}$/.test(year)).sort((left, right) => Number(right) - Number(left));
   const year = years[0];
   return year ? { year: Number(year), value: values?.[year] } : null;
 }
 
+function finiteNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+type PropertyResearchResult = {
+  summary?: string;
+  identity?: Record<string, unknown>;
+  ownership?: Record<string, unknown>;
+  property?: Record<string, unknown>;
+  financial?: Record<string, unknown>;
+  listing?: Record<string, unknown>;
+  legal?: Record<string, unknown>;
+  missing_fields?: string[];
+  sources?: Array<{ title?: string; url?: string; supports?: string[] }>;
+  researched_at?: string;
+};
+
+type ResearchInput = { queryType: "address" | "apn"; queryText: string; county: string; state: string; force?: boolean };
+
+function parseJsonObject(text: string) {
+  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first < 0 || last <= first) throw new Error("No JSON object returned");
+  return JSON.parse(cleaned.slice(first, last + 1)) as PropertyResearchResult;
+}
+
+function cleanUrl(value: unknown) {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.protocol === "https:" ? url.toString() : "";
+  } catch { return ""; }
+}
+
+function normalizeResearchResult(result: PropertyResearchResult) {
+  const object = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const identity = object(result.identity);
+  const ownership = object(result.ownership);
+  const property = object(result.property);
+  const financial = object(result.financial);
+  const listing = object(result.listing);
+  const legal = object(result.legal);
+  ownership.public_business_website = cleanUrl(ownership.public_business_website) || null;
+  listing.listing_url = cleanUrl(listing.listing_url) || null;
+  const sources = Array.isArray(result.sources) ? result.sources.map((source) => ({
+    title: String(source?.title ?? "Source").slice(0, 160),
+    url: cleanUrl(source?.url),
+    supports: Array.isArray(source?.supports) ? source.supports.map((item) => String(item).slice(0, 100)).slice(0, 12) : [],
+  })).filter((source) => source.url).slice(0, 15) : [];
+  return {
+    summary: String(result.summary ?? "").slice(0, 2_000),
+    identity,
+    ownership,
+    property,
+    financial,
+    listing,
+    legal,
+    missing_fields: Array.isArray(result.missing_fields) ? result.missing_fields.map((item) => String(item).slice(0, 100)).slice(0, 30) : [],
+    sources,
+    researched_at: new Date().toISOString(),
+  } satisfies PropertyResearchResult;
+}
+
+function setWhenMissing(target: Record<string, unknown>, key: string, value: unknown) {
+  if ((target[key] === null || target[key] === undefined || target[key] === "") && value !== null && value !== undefined && value !== "") target[key] = value;
+}
+
+async function enrichResearchWithRentCast(result: PropertyResearchResult, env: Env, fallbackAddress: string) {
+  const address = String(result.identity?.address ?? fallbackAddress).trim();
+  if (!address || !env.RENTCAST_API_KEY || !(await reserveRentCastRequest(env.DB))) return result;
+  const params = new URLSearchParams({ address, limit: "1" });
+  const response = await fetch(`https://api.rentcast.io/v1/properties?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
+  const payload = await response.json() as Array<Record<string, unknown>> | { message?: string };
+  const record = Array.isArray(payload) ? payload[0] : null;
+  if (!response.ok || !record) return result;
+  const identity = result.identity ?? (result.identity = {});
+  const property = result.property ?? (result.property = {});
+  const financial = result.financial ?? (result.financial = {});
+  const legal = result.legal ?? (result.legal = {});
+  setWhenMissing(identity, "address", record.formattedAddress);
+  setWhenMissing(identity, "apn", record.assessorID);
+  setWhenMissing(identity, "county", record.county);
+  setWhenMissing(identity, "state", record.state);
+  setWhenMissing(identity, "latitude", record.latitude);
+  setWhenMissing(identity, "longitude", record.longitude);
+  setWhenMissing(property, "property_type", record.propertyType);
+  setWhenMissing(property, "beds", record.bedrooms);
+  setWhenMissing(property, "baths", record.bathrooms);
+  setWhenMissing(property, "square_feet", record.squareFootage);
+  setWhenMissing(property, "lot_size_sqft", record.lotSize);
+  setWhenMissing(property, "lot_size_acres", finiteNumber(record.lotSize) ? Number((Number(record.lotSize) / 43_560).toFixed(3)) : null);
+  setWhenMissing(property, "year_built", record.yearBuilt);
+  setWhenMissing(financial, "last_sale_price", record.lastSalePrice);
+  setWhenMissing(financial, "last_sale_date", record.lastSaleDate);
+  setWhenMissing(legal, "legal_description", record.legalDescription);
+  setWhenMissing(legal, "zoning", record.zoning);
+  const assessments = record.taxAssessments as Record<string, { value?: number; land?: number; improvements?: number }> | undefined;
+  const taxes = record.propertyTaxes as Record<string, { total?: number } | number> | undefined;
+  const assessment = latestYearValue(assessments);
+  const tax = latestYearValue(taxes);
+  setWhenMissing(financial, "assessed_value", assessment?.value?.value);
+  setWhenMissing(financial, "land_value", assessment?.value?.land);
+  setWhenMissing(financial, "improvement_value", assessment?.value?.improvements);
+  setWhenMissing(financial, "assessment_year", assessment?.year);
+  setWhenMissing(financial, "annual_tax", typeof tax?.value === "number" ? tax.value : tax?.value?.total);
+  setWhenMissing(financial, "tax_year", tax?.year);
+  result.sources = [...(result.sources ?? []), { title: "RentCast property record", url: "https://www.rentcast.io/", supports: ["structured property characteristics", "assessment and tax history when available"] }];
+  return result;
+}
+
+async function runPropertyResearch(env: Env, input: ResearchInput) {
+  if (!env.OPENAI_API_KEY) throw new Error("The AI connection has not been added to Cloudflare yet.");
+  const location = [input.county && `${input.county} County`, input.state].filter(Boolean).join(", ");
+  const subject = input.queryType === "apn" ? `APN ${input.queryText}${location ? ` in ${location}` : ""}` : input.queryText;
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      tools: [{ type: "web_search" }],
+      max_tool_calls: 4,
+      include: ["web_search_call.action.sources"],
+      instructions: `Research one exact US property using public web sources. Search official county assessor, tax, recorder, and GIS sources first; then current real-estate listings and the listing brokerage. Match the exact APN/address and jurisdiction. Never merge facts from similarly named properties. Report only facts supported by a source. Use null for unknown values and list important unknowns in missing_fields. Do not infer bedrooms, bathrooms, garage, acreage, ownership, value, sale status, or contact details. Owner names may be reported from public property records. Never return a private individual's phone number, email, social profile, or mailing address. Owner contact fields may contain only an explicitly published business/organization contact. Listing-agent contact may contain only professional contact information published with the listing. Return only one valid JSON object with this exact shape: {"summary":string,"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null,"latitude":number|null,"longitude":number|null},"ownership":{"owner_name":string|null,"owner_type":string|null,"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null},"property":{"property_type":string|null,"lot_size_acres":number|null,"lot_size_sqft":number|null,"beds":number|null,"baths":number|null,"square_feet":number|null,"year_built":number|null,"garage_spaces":number|null,"garage_sqft":number|null},"financial":{"assessed_value":number|null,"land_value":number|null,"improvement_value":number|null,"assessment_year":number|null,"annual_tax":number|null,"tax_year":number|null,"estimated_value":number|null,"last_sale_price":number|null,"last_sale_date":string|null},"listing":{"for_sale":boolean|null,"status":string|null,"price":number|null,"listing_url":string|null,"agent_name":string|null,"brokerage":string|null,"professional_phone":string|null,"professional_email":string|null},"legal":{"legal_description":string|null,"zoning":string|null,"subdivision":string|null},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}. Every source URL must be a page you actually consulted.`,
+      input: `Research this exact property: ${subject}`,
+    }),
+  });
+  const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  if (!response.ok) throw new Error(safeOpenAIError(response.status, payload));
+  const text = responseText(payload);
+  if (!text) throw new Error("The property search returned no usable information.");
+  let result: PropertyResearchResult;
+  try { result = normalizeResearchResult(parseJsonObject(text)); }
+  catch { throw new Error("The property search could not organize its findings. Please try once more."); }
+  return enrichResearchWithRentCast(result, env, input.queryType === "address" ? input.queryText : "");
+}
+
+async function researchLookup(env: Env, username: string, input: ResearchInput) {
+  const lookupKey = `${input.queryType}:${input.queryText.toLowerCase().replace(/[^a-z0-9]/g, "")}:${input.county.toLowerCase().trim()}:${input.state.toUpperCase().trim()}`.slice(0, 320);
+  const cached = !input.force ? await env.DB.prepare("SELECT id, result_json, starred, refreshed_at FROM property_researches WHERE owner = ? AND lookup_key = ? AND (starred = 1 OR refreshed_at > ?)").bind(username, lookupKey, Date.now() - 90 * 24 * 60 * 60_000).first<{ id: number; result_json: string; starred: number; refreshed_at: number }>() : null;
+  if (cached) return { id: cached.id, result: JSON.parse(cached.result_json) as PropertyResearchResult, starred: cached.starred === 1, cached: true, refreshedAt: cached.refreshed_at };
+  if (!(await reservePropertyResearchRequest(env.DB))) throw new Error("The site's 20-investigation monthly Parcel Scout limit has been reached.");
+  const result = await runPropertyResearch(env, input);
+  const now = Date.now();
+  await env.DB.prepare(`INSERT INTO property_researches (owner, lookup_key, query_type, query_text, county, state, result_json, created_at, refreshed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner, lookup_key) DO UPDATE SET query_type=excluded.query_type, query_text=excluded.query_text, county=excluded.county, state=excluded.state, result_json=excluded.result_json, refreshed_at=excluded.refreshed_at`)
+    .bind(username, lookupKey, input.queryType, input.queryText, input.county, input.state, JSON.stringify(result), now, now).run();
+  const saved = await env.DB.prepare("SELECT id FROM property_researches WHERE owner = ? AND lookup_key = ?").bind(username, lookupKey).first<{ id: number }>();
+  return { id: saved?.id, result, starred: false, cached: false, refreshedAt: now };
+}
+
+async function propertyResearch(request: Request, env: Env, username: string) {
+  if (request.method === "GET") {
+    const rows = await env.DB.prepare("SELECT id, query_type, query_text, county, state, result_json, starred, refreshed_at FROM property_researches WHERE owner = ? AND (starred = 1 OR refreshed_at > ?) ORDER BY starred DESC, refreshed_at DESC LIMIT 100").bind(username, Date.now() - 90 * 24 * 60 * 60_000).all<{ id: number; query_type: string; query_text: string; county: string; state: string; result_json: string; starred: number; refreshed_at: number }>();
+    const period = new Date().toISOString().slice(0, 7);
+    const usage = await env.DB.prepare("SELECT requests FROM api_usage WHERE service = 'property_research' AND period = ?").bind(period).first<{ requests: number }>();
+    return json({ researches: (rows.results ?? []).map((row) => ({ ...row, result: JSON.parse(row.result_json), result_json: undefined })), usage: { requests: usage?.requests ?? 0, limit: monthlyPropertyResearchLimit, period } });
+  }
+  const body = await request.json<{ id?: number; queryType?: string; queryText?: string; county?: string; state?: string; force?: boolean; starred?: boolean }>();
+  if (request.method === "PATCH") {
+    const id = Number(body.id);
+    if (!Number.isInteger(id)) return json({ error: "Invalid saved lookup." }, 400);
+    await env.DB.prepare("UPDATE property_researches SET starred = ? WHERE id = ? AND owner = ?").bind(body.starred ? 1 : 0, id, username).run();
+    if (!body.starred) await env.DB.prepare("DELETE FROM property_researches WHERE id = ? AND owner = ? AND refreshed_at <= ?").bind(id, username, Date.now() - 90 * 24 * 60 * 60_000).run();
+    return json({ ok: true, starred: Boolean(body.starred) });
+  }
+  if (request.method === "DELETE") {
+    const id = Number(body.id);
+    if (!Number.isInteger(id)) return json({ error: "Invalid saved lookup." }, 400);
+    await env.DB.prepare("DELETE FROM property_researches WHERE id = ? AND owner = ?").bind(id, username).run();
+    return json({ ok: true });
+  }
+  if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
+  const queryType = body.queryType === "apn" ? "apn" : "address";
+  const queryText = String(body.queryText ?? "").trim().slice(0, 240);
+  const county = String(body.county ?? "").trim().replace(/\s+County$/i, "").slice(0, 80);
+  const state = String(body.state ?? "").trim().toUpperCase().slice(0, 2);
+  if (!queryText) return json({ error: `Enter ${queryType === "apn" ? "an APN" : "a property address"}.` }, 400);
+  if (queryType === "apn" && (!county || state.length !== 2)) return json({ error: "APN searches need the county and two-letter state." }, 400);
+  try { return json(await researchLookup(env, username, { queryType, queryText, county, state, force: Boolean(body.force) })); }
+  catch (error) { return json({ error: error instanceof Error ? error.message : "Unable to research that property." }, 502); }
+}
+
 async function portfolioParcel(request: Request, env: Env, username: string) {
   if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-  if (!env.RENTCAST_API_KEY) return json({ error: "The parcel-data connection is not configured." }, 503);
   const body = await request.json<{ id?: number }>();
   const id = Number(body.id);
   if (!Number.isInteger(id)) return json({ error: "Invalid property." }, 400);
-  const property = await env.DB.prepare(`SELECT p.address FROM portfolio_properties p WHERE p.id = ? AND
-    (p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members m WHERE m.property_id = p.id AND m.username = ?))`).bind(id, username, username).first<{ address: string }>();
+  const property = await env.DB.prepare(`SELECT p.address, p.apn, p.county, p.state FROM portfolio_properties p WHERE p.id = ? AND
+    (p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members m WHERE m.property_id = p.id AND m.username = ?))`).bind(id, username, username).first<{ address: string; apn: string; county: string; state: string }>();
   if (!property) return json({ error: "Property not found." }, 404);
-  if (!property.address) return json({ error: "Add a street address to retrieve county parcel records. APNs need a county-specific lookup source." }, 422);
 
   const cached = await env.DB.prepare("SELECT * FROM portfolio_parcel_data WHERE property_id = ? AND refreshed_at > ?").bind(id, Date.now() - 30 * 24 * 60 * 60_000).first();
   if (cached) return json({ parcel: cached, cached: true });
-  if (!(await reserveRentCastRequest(env.DB))) return json({ error: "The site's 50-request monthly property-data limit has been reached." }, 429);
-
-  const params = new URLSearchParams({ address: property.address, limit: "1" });
-  const response = await fetch(`https://api.rentcast.io/v1/properties?${params}`, { headers: { "X-Api-Key": env.RENTCAST_API_KEY } });
-  const payload = await response.json() as ParcelRecord[] | { message?: string };
-  const record = Array.isArray(payload) ? payload[0] : null;
-  if (!response.ok || !record) return json({ error: "No county parcel record was available for that address." }, 422);
-
-  const assessment = latestYearValue(record.taxAssessments);
-  const taxes = latestYearValue(record.propertyTaxes);
-  const taxValue = taxes?.value;
-  const annualTax = typeof taxValue === "number" ? taxValue : taxValue?.total;
+  if (property.apn && (!property.county || property.state.length !== 2)) return json({ error: "Edit this APN-only property and add its county and two-letter state first." }, 422);
+  if (!property.apn && !property.address) return json({ error: "Add an APN or street address to retrieve parcel records." }, 422);
+  let research: PropertyResearchResult;
+  try {
+    research = (await researchLookup(env, username, { queryType: property.apn ? "apn" : "address", queryText: property.apn || property.address, county: property.county, state: property.state })).result;
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Unable to research this parcel." }, 502);
+  }
+  const identity = research.identity ?? {};
+  const financial = research.financial ?? {};
+  const legal = research.legal ?? {};
   const parcel = {
     property_id: id,
-    assessor_id: String(record.assessorID ?? "").slice(0, 100) || null,
-    assessed_value: Number.isFinite(Number(assessment?.value?.value)) ? Math.round(Number(assessment?.value?.value)) : null,
-    land_value: Number.isFinite(Number(assessment?.value?.land)) ? Math.round(Number(assessment?.value?.land)) : null,
-    improvement_value: Number.isFinite(Number(assessment?.value?.improvements)) ? Math.round(Number(assessment?.value?.improvements)) : null,
-    assessment_year: assessment?.year ?? null,
-    annual_tax: Number.isFinite(Number(annualTax)) ? Math.round(Number(annualTax)) : null,
-    tax_year: taxes?.year ?? null,
-    legal_description: String(record.legalDescription ?? "").slice(0, 1_000) || null,
-    zoning: String(record.zoning ?? "").slice(0, 120) || null,
-    last_sale_price: Number.isFinite(Number(record.lastSalePrice)) ? Math.round(Number(record.lastSalePrice)) : null,
-    last_sale_date: String(record.lastSaleDate ?? "").slice(0, 40) || null,
+    assessor_id: String(identity.apn ?? property.apn).slice(0, 100) || null,
+    assessed_value: finiteNumber(financial.assessed_value) === null ? null : Math.round(finiteNumber(financial.assessed_value)!),
+    land_value: finiteNumber(financial.land_value) === null ? null : Math.round(finiteNumber(financial.land_value)!),
+    improvement_value: finiteNumber(financial.improvement_value) === null ? null : Math.round(finiteNumber(financial.improvement_value)!),
+    assessment_year: finiteNumber(financial.assessment_year),
+    annual_tax: finiteNumber(financial.annual_tax) === null ? null : Math.round(finiteNumber(financial.annual_tax)!),
+    tax_year: finiteNumber(financial.tax_year),
+    legal_description: String(legal.legal_description ?? "").slice(0, 1_000) || null,
+    zoning: String(legal.zoning ?? "").slice(0, 120) || null,
+    last_sale_price: finiteNumber(financial.last_sale_price) === null ? null : Math.round(finiteNumber(financial.last_sale_price)!),
+    last_sale_date: String(financial.last_sale_date ?? "").slice(0, 40) || null,
     refreshed_at: Date.now(),
   };
   await env.DB.prepare(`INSERT INTO portfolio_parcel_data (property_id, assessor_id, assessed_value, land_value, improvement_value, assessment_year, annual_tax, tax_year, legal_description, zoning, last_sale_price, last_sale_date, refreshed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(property_id) DO UPDATE SET assessor_id=excluded.assessor_id, assessed_value=excluded.assessed_value, land_value=excluded.land_value, improvement_value=excluded.improvement_value, assessment_year=excluded.assessment_year, annual_tax=excluded.annual_tax, tax_year=excluded.tax_year, legal_description=excluded.legal_description, zoning=excluded.zoning, last_sale_price=excluded.last_sale_price, last_sale_date=excluded.last_sale_date, refreshed_at=excluded.refreshed_at`)
     .bind(parcel.property_id, parcel.assessor_id, parcel.assessed_value, parcel.land_value, parcel.improvement_value, parcel.assessment_year, parcel.annual_tax, parcel.tax_year, parcel.legal_description, parcel.zoning, parcel.last_sale_price, parcel.last_sale_date, parcel.refreshed_at).run();
-  if (parcel.assessor_id) await env.DB.prepare("UPDATE portfolio_properties SET apn = CASE WHEN apn = '' THEN ? ELSE apn END WHERE id = ?").bind(parcel.assessor_id, id).run();
-  return json({ parcel, cached: false });
+  const discoveredAddress = String(identity.address ?? "").slice(0, 240);
+  const discoveredCounty = String(identity.county ?? property.county).slice(0, 80);
+  const discoveredState = String(identity.state ?? property.state).toUpperCase().slice(0, 2);
+  const estimatedValue = finiteNumber(financial.estimated_value);
+  await env.DB.prepare("UPDATE portfolio_properties SET address = CASE WHEN address = '' THEN ? ELSE address END, apn = CASE WHEN apn = '' THEN ? ELSE apn END, county = CASE WHEN county = '' THEN ? ELSE county END, state = CASE WHEN state = '' THEN ? ELSE state END, estimated_value = CASE WHEN estimated_value = 0 AND ? IS NOT NULL THEN ? ELSE estimated_value END, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), updated_at = ? WHERE id = ?")
+    .bind(discoveredAddress, parcel.assessor_id ?? "", discoveredCounty, discoveredState, estimatedValue, estimatedValue, finiteNumber(identity.latitude), finiteNumber(identity.longitude), Date.now(), id).run();
+  return json({ parcel, cached: false, source: "Parcel Scout public-record research" });
 }
 
 async function portfolio(request: Request, env: Env, username: string) {
   if (request.method === "GET") {
-    const result = await env.DB.prepare(`SELECT p.id, p.owner, p.name, p.address, p.apn, p.occupancy, p.estimated_value, p.money_owed, p.notes, p.latitude, p.longitude, p.updated_at,
+    const result = await env.DB.prepare(`SELECT p.id, p.owner, p.name, p.address, p.apn, p.county, p.state, p.occupancy, p.estimated_value, p.money_owed, p.notes, p.latitude, p.longitude, p.updated_at,
       d.assessor_id, d.assessed_value, d.land_value, d.improvement_value, d.assessment_year, d.annual_tax, d.tax_year, d.legal_description, d.zoning, d.last_sale_price, d.last_sale_date, d.refreshed_at AS parcel_refreshed_at,
       GROUP_CONCAT(m.username) AS shared_with FROM portfolio_properties p LEFT JOIN portfolio_members m ON m.property_id = p.id LEFT JOIN portfolio_parcel_data d ON d.property_id = p.id
       WHERE p.owner = ? OR EXISTS (SELECT 1 FROM portfolio_members mine WHERE mine.property_id = p.id AND mine.username = ?)
       GROUP BY p.id ORDER BY p.updated_at DESC`).bind(username, username).all();
     return json({ properties: result.results ?? [] });
   }
-  const body = await request.json<{ id?: number; name?: string; address?: string; apn?: string; occupancy?: string; estimatedValue?: number; moneyOwed?: number; notes?: string; latitude?: number; longitude?: number; sharedWith?: string[] }>();
+  const body = await request.json<{ id?: number; name?: string; address?: string; apn?: string; county?: string; state?: string; occupancy?: string; estimatedValue?: number; moneyOwed?: number; notes?: string; latitude?: number; longitude?: number; sharedWith?: string[] }>();
   const name = String(body.name ?? "").trim().slice(0, 100);
   const address = String(body.address ?? "").trim().slice(0, 240);
   const apn = String(body.apn ?? "").trim().slice(0, 80);
+  const county = String(body.county ?? "").trim().replace(/\s+County$/i, "").slice(0, 80);
+  const state = String(body.state ?? "").trim().toUpperCase().slice(0, 2);
   const occupancy = ["rented", "primary", "secondary", "vacant"].includes(String(body.occupancy)) ? String(body.occupancy) : "vacant";
   const estimatedValue = Math.max(0, Math.round(Number(body.estimatedValue) || 0));
   const moneyOwed = Math.max(0, Math.round(Number(body.moneyOwed) || 0));
@@ -513,8 +695,8 @@ async function portfolio(request: Request, env: Env, username: string) {
     const suppliedLatitude = Number(body.latitude); const suppliedLongitude = Number(body.longitude);
     const coordinates = Number.isFinite(suppliedLatitude) && Number.isFinite(suppliedLongitude) ? { latitude: suppliedLatitude, longitude: suppliedLongitude } : address ? await geocodeAddress(address, env) : null;
     const now = Date.now();
-    const created = await env.DB.prepare("INSERT INTO portfolio_properties (owner, name, address, apn, occupancy, estimated_value, money_owed, notes, latitude, longitude, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(username, name, address, apn, occupancy, estimatedValue, moneyOwed, notes, coordinates?.latitude ?? null, coordinates?.longitude ?? null, now, now).run();
+    const created = await env.DB.prepare("INSERT INTO portfolio_properties (owner, name, address, apn, county, state, occupancy, estimated_value, money_owed, notes, latitude, longitude, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(username, name, address, apn, county, state, occupancy, estimatedValue, moneyOwed, notes, coordinates?.latitude ?? null, coordinates?.longitude ?? null, now, now).run();
     const id = Number(created.meta.last_row_id);
     if (members.length) await env.DB.batch(members.map((member) => env.DB.prepare("INSERT INTO portfolio_members (property_id, username, created_at) VALUES (?, ?, ?)").bind(id, member, now)));
     return json({ ok: true, id }, 201);
@@ -531,8 +713,8 @@ async function portfolio(request: Request, env: Env, username: string) {
     if (!name || (!address && !apn)) return json({ error: "Add a property name and either a full address or APN." }, 400);
     const suppliedLatitude = Number(body.latitude); const suppliedLongitude = Number(body.longitude);
     const coordinates = Number.isFinite(suppliedLatitude) && Number.isFinite(suppliedLongitude) ? { latitude: suppliedLatitude, longitude: suppliedLongitude } : address && address !== owned.address ? await geocodeAddress(address, env) : null;
-    await env.DB.prepare("UPDATE portfolio_properties SET name = ?, address = ?, apn = ?, occupancy = ?, estimated_value = ?, money_owed = ?, notes = ?, latitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, latitude) END, longitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, longitude) END, updated_at = ? WHERE id = ? AND owner = ?")
-      .bind(name, address, apn, occupancy, estimatedValue, moneyOwed, notes, address, coordinates?.latitude ?? null, address, coordinates?.longitude ?? null, Date.now(), id, username).run();
+    await env.DB.prepare("UPDATE portfolio_properties SET name = ?, address = ?, apn = ?, county = ?, state = ?, occupancy = ?, estimated_value = ?, money_owed = ?, notes = ?, latitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, latitude) END, longitude = CASE WHEN ? = '' THEN NULL ELSE COALESCE(?, longitude) END, updated_at = ? WHERE id = ? AND owner = ?")
+      .bind(name, address, apn, county, state, occupancy, estimatedValue, moneyOwed, notes, address, coordinates?.latitude ?? null, address, coordinates?.longitude ?? null, Date.now(), id, username).run();
     await env.DB.prepare("DELETE FROM portfolio_members WHERE property_id = ?").bind(id).run();
     if (members.length) await env.DB.batch(members.map((member) => env.DB.prepare("INSERT INTO portfolio_members (property_id, username, created_at) VALUES (?, ?, ?)").bind(id, member, Date.now())));
     return json({ ok: true });
@@ -731,6 +913,14 @@ async function reserveRentCastRequest(db: D1Database) {
   await db.prepare("INSERT OR IGNORE INTO api_usage (service, period, requests, updated_at) VALUES ('rentcast', ?, 0, ?)").bind(period, Date.now()).run();
   const reservation = await db.prepare("UPDATE api_usage SET requests = requests + 1, updated_at = ? WHERE service = 'rentcast' AND period = ? AND requests < ?")
     .bind(Date.now(), period, monthlyRentCastRequestLimit).run();
+  return Number(reservation.meta.changes ?? 0) === 1;
+}
+
+async function reservePropertyResearchRequest(db: D1Database) {
+  const period = new Date().toISOString().slice(0, 7);
+  await db.prepare("INSERT OR IGNORE INTO api_usage (service, period, requests, updated_at) VALUES ('property_research', ?, 0, ?)").bind(period, Date.now()).run();
+  const reservation = await db.prepare("UPDATE api_usage SET requests = requests + 1, updated_at = ? WHERE service = 'property_research' AND period = ? AND requests < ?")
+    .bind(Date.now(), period, monthlyPropertyResearchLimit).run();
   return Number(reservation.meta.changes ?? 0) === 1;
 }
 
@@ -1174,6 +1364,12 @@ const worker = {
         if (request.method === "GET") return propertyListings(request, env, username);
         return json({ error: "Method not allowed." }, 405);
       }
+      if (url.pathname === "/api/property-research") {
+        const username = await authenticated(request, env);
+        if (!username) return json({ error: "Please log in again." }, 401);
+        if (!(await pageAccess(env, username, "properties"))) return json({ error: "You do not have access to Parcel Scout." }, 403);
+        return propertyResearch(request, env, username);
+      }
       if (url.pathname === "/api/list-items" || url.pathname === "/api/lists/simplify" || url.pathname.startsWith("/api/list-items/")) {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
@@ -1187,20 +1383,19 @@ const worker = {
       if (url.pathname.startsWith("/profile")) {
         const username = await authenticated(request, env);
         if (!username) return Response.redirect(new URL("/login", request.url), 302);
-        if (username !== "carsonpauli") return Response.redirect(new URL("/portal", request.url), 302);
       }
       if (url.pathname.startsWith("/admin/users")) {
         const username = await authenticated(request, env);
         if (!username) return Response.redirect(new URL("/login", request.url), 302);
         if (!(await pageAccess(env, username, "user_management"))) return Response.redirect(new URL("/portal", request.url), 302);
       }
-      if (url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists")) {
+      if (url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/parcel-scout") || url.pathname.startsWith("/lists")) {
         const username = await authenticated(request, env);
         if (!username) return Response.redirect(new URL("/login", request.url), 302);
-        const page: PageKey = url.pathname.startsWith("/assistant") ? "assistant" : url.pathname.startsWith("/properties") ? "properties" : "lists";
+        const page: PageKey = url.pathname.startsWith("/assistant") ? "assistant" : url.pathname.startsWith("/properties") || url.pathname.startsWith("/parcel-scout") ? "properties" : "lists";
         if (!(await pageAccess(env, username, page))) return Response.redirect(new URL("/portal", request.url), 302);
       }
-      if ((url.pathname.startsWith("/portal") || url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/lists") || url.pathname.startsWith("/profile")) && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
+      if ((url.pathname.startsWith("/portal") || url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/parcel-scout") || url.pathname.startsWith("/lists") || url.pathname.startsWith("/profile")) && !(await authenticated(request, env))) return Response.redirect(new URL("/login", request.url), 302);
     } catch (error) {
       console.error("Authentication request failed", error);
       return json({ error: "The authentication service encountered an error." }, 500);

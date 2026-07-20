@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 const spaces = [
   { key: "properties", title: "Property Finder", description: "Search, filter, map, and analyze real-estate opportunities.", href: "/properties" },
+  { key: "properties", title: "Parcel Scout", description: "Investigate an address or APN across public property records and listings.", href: "/parcel-scout" },
   { key: "portfolio", title: "Property Portfolio", description: "Manage owned properties, values, occupancy, sharing, and local weather.", href: "/portfolio" },
   { key: "lists", title: "Lists", description: "Shared projects, assignments, and grocery lists in one place.", href: "/lists" },
 ];
