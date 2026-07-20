@@ -509,6 +509,11 @@ function normalizeResearchResult(result: PropertyResearchResult) {
     ownership_source_tier: ownershipRaw.ownership_source_tier ?? null,
     official_record_found: typeof ownershipRaw.official_record_found === "boolean" ? ownershipRaw.official_record_found : null,
     secondary_record_found: typeof ownershipRaw.secondary_record_found === "boolean" ? ownershipRaw.secondary_record_found : null,
+    rentcast_checked: typeof ownershipRaw.rentcast_checked === "boolean" ? ownershipRaw.rentcast_checked : null,
+    rentcast_owner_found: typeof ownershipRaw.rentcast_owner_found === "boolean" ? ownershipRaw.rentcast_owner_found : null,
+    homes_backup_checked: typeof ownershipRaw.homes_backup_checked === "boolean" ? ownershipRaw.homes_backup_checked : null,
+    homes_backup_status: ownershipRaw.homes_backup_status ?? null,
+    homes_source_url: cleanUrl(ownershipRaw.homes_source_url) || null,
     search_summary: ownershipRaw.search_summary ?? null,
     ownership_notes: ownershipRaw.ownership_notes ?? null,
     ownership_record_url: cleanUrl(ownershipRaw.ownership_record_url) || evidence.find((item) => /assessor|tax|recorder|deed/i.test(item.source_kind))?.url || null,
@@ -612,7 +617,13 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   }
   const payload = await response.json() as Array<Record<string, unknown>> | { message?: string };
   const record = Array.isArray(payload) ? payload[0] : null;
-  if (!response.ok || !record) return result;
+  const ownershipState = result.ownership ?? (result.ownership = {});
+  ownershipState.rentcast_checked = true;
+  if (!response.ok || !record) {
+    ownershipState.rentcast_owner_found = false;
+    setWhenMissing(ownershipState, "search_summary", "RentCast did not return a matching property owner, so Parcel Scout will try its backup sources.");
+    return result;
+  }
   const identity = result.identity ?? (result.identity = {});
   const ownership = result.ownership ?? (result.ownership = {});
   const property = result.property ?? (result.property = {});
@@ -637,6 +648,8 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   setWhenMissing(legal, "zoning", record.zoning);
   const owner = record.owner as { names?: unknown[]; type?: unknown; ownerOccupied?: unknown } | undefined;
   const ownerNames = Array.isArray(owner?.names) ? owner.names.map((name) => String(name).trim()).filter(Boolean).slice(0, 10) : [];
+  ownership.rentcast_checked = true;
+  ownership.rentcast_owner_found = ownerNames.length > 0;
   if (ownerNames.length > 0) {
     setWhenMissing(ownership, "owner_name", ownerNames[0]);
     if (!Array.isArray(ownership.additional_owners) || ownership.additional_owners.length === 0) ownership.additional_owners = ownerNames.slice(1);
@@ -670,6 +683,75 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   setWhenMissing(financial, "tax_year", tax?.year);
   result.sources = [...(result.sources ?? []), { title: "RentCast property record", url: "https://developers.rentcast.io/reference/property-data-schema", supports: ["current owner name and entity type when available", "structured property characteristics", "assessment and tax history"] }];
   return result;
+}
+
+function mergeHomesFallback(base: PropertyResearchResult, homes: PropertyResearchResult) {
+  const homesOwner = homes.ownership ?? {};
+  base = mergeDeepOwnership(base, homes);
+  const baseOwner = base.ownership ?? (base.ownership = {});
+  for (const key of ["homes_backup_checked", "homes_backup_status", "homes_source_url", "rentcast_checked", "rentcast_owner_found"] as const) {
+    if (homesOwner[key] !== null && homesOwner[key] !== undefined && homesOwner[key] !== "") baseOwner[key] = homesOwner[key];
+  }
+  setWhenMissing(baseOwner, "search_summary", homesOwner.search_summary);
+  setWhenMissing(baseOwner, "ownership_notes", homesOwner.ownership_notes);
+  for (const sectionName of ["identity", "property", "financial", "listing", "legal"] as const) {
+    const target = base[sectionName] ?? (base[sectionName] = {});
+    for (const [key, value] of Object.entries(homes[sectionName] ?? {})) {
+      if (Array.isArray(value)) {
+        if (!Array.isArray(target[key]) || (target[key] as unknown[]).length === 0) target[key] = value;
+      } else setWhenMissing(target, key, value);
+    }
+  }
+  return base;
+}
+
+async function runHomesFallbackResearch(env: Env, input: ResearchInput, base: PropertyResearchResult) {
+  const address = String(base.identity?.address ?? (input.queryType === "address" ? input.queryText : "")).trim();
+  const apn = String(base.identity?.apn ?? (input.queryType === "apn" ? input.queryText : "")).trim();
+  const county = String(base.identity?.county ?? input.county).trim();
+  const state = String(base.identity?.state ?? input.state).trim();
+  const fallbackModel = env.OPENAI_MODEL || "gpt-5.4-mini";
+  const preferredModel = env.PROPERTY_RESEARCH_MODEL || "gpt-5.6-terra";
+
+  async function requestHomes(model: string) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        tools: [{ type: "web_search" }],
+        max_tool_calls: 6,
+        include: ["web_search_call.action.sources"],
+        instructions: `Use Homes.com as a targeted backup source for one exact US property after RentCast returned no owner.
+
+Search requirements:
+- Find the exact Homes.com property page using the quoted full address and, when useful, the exact APN.
+- Run a targeted search-index query in the form: site:homes.com/property "FULL STREET ADDRESS" "Ownership History" "Current Owners". Also try the address without punctuation and with standard street abbreviations.
+- Confirm the page matches the same address, city, state, county, and parcel before using any fact.
+- Inspect the public page for ownership history, owner type, property facts, sale history, assessed values, Homes.com estimated value, listing status, and other exact-property details.
+- If Homes.com explicitly displays an owner name on the consulted page, return it with medium confidence and secondary exact-property source status.
+- If the Homes.com page hides the name behind sign-in but the search-index result visibly contains the exact full property address, the explicit phrase "Current Owners," an owner name, and a current ownership date range, the snippet may be returned as low-confidence secondary evidence. Set ownership_source_tier to "Homes.com search-index snippet", source_kind to "search-index ownership snippet", record_as_of to the visible ownership start date or range, and explain that the name was visible in the indexed snippet but gated on the destination page.
+- Never use a snippet that omits the exact street address, labels only a possible resident, lacks an ownership label, or could describe a different parcel. Never promote snippet-only evidence above low confidence unless another independent exact-property source corroborates the same owner.
+- If the ownership row says "Sign in to view," is otherwise gated, or does not display a name and no qualifying indexed ownership snippet exists, never guess or infer the owner. Set homes_backup_status to "owner gated by Homes.com sign-in" and leave owner_name null.
+- When the exact gated page and a qualifying indexed ownership snippet are both found, preserve both facts: return the snippet-backed owner at low confidence and set homes_backup_status to "owner found in Homes.com search-index snippet; destination page is sign-in gated".
+- Do not use people-search sites or return personal phone numbers, emails, mailing addresses, relatives, or social profiles.
+- Preserve all direct source URLs. Use null for unsupported facts.
+
+Return only one JSON object: {"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null},"ownership":{"owner_name":string|null,"additional_owners":string[],"owner_type":string|null,"ownership_confidence":"medium"|"low"|null,"ownership_source_tier":string|null,"official_record_found":false,"secondary_record_found":boolean,"rentcast_checked":true,"rentcast_owner_found":false,"homes_backup_checked":true,"homes_backup_status":string,"homes_source_url":string|null,"record_as_of":string|null,"search_summary":string,"ownership_notes":string|null,"ownership_record_url":string|null,"evidence":[{"source_kind":string,"name":string|null,"record_date":string|null,"title":string,"url":string,"supports":string}]},"property":{"property_type":string|null,"lot_size_acres":number|null,"lot_size_sqft":number|null,"beds":number|null,"baths":number|null,"square_feet":number|null,"year_built":number|null,"garage_spaces":number|null,"garage_sqft":number|null},"financial":{"assessed_value":number|null,"land_value":number|null,"improvement_value":number|null,"assessment_year":number|null,"annual_tax":number|null,"tax_year":number|null,"estimated_value":number|null,"last_sale_price":number|null,"last_sale_date":string|null,"valuation_evidence":[{"source_name":string,"value":number,"value_type":string,"as_of":string|null,"url":string,"notes":string|null,"independent_source_group":string|null}]},"listing":{"for_sale":boolean|null,"status":string|null,"price":number|null,"listing_url":string|null},"legal":{"legal_description":string|null,"zoning":string|null,"subdivision":string|null},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
+        input: `Find the exact Homes.com backup record.\nAddress: ${address || "unknown"}\nAPN: ${apn || "unknown"}\nCounty: ${county || "unknown"}\nState: ${state || "unknown"}`,
+      }),
+    });
+    const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+    return { response, payload };
+  }
+
+  let attempt = await requestHomes(preferredModel);
+  const modelIssue = !attempt.response.ok && /model|access/i.test(`${attempt.payload.error?.code ?? ""} ${attempt.payload.error?.message ?? ""}`);
+  if (modelIssue && preferredModel !== fallbackModel) attempt = await requestHomes(fallbackModel);
+  if (!attempt.response.ok) throw new Error(safeOpenAIError(attempt.response.status, attempt.payload));
+  const text = responseText(attempt.payload);
+  if (!text) throw new Error("The Homes.com backup returned no usable information.");
+  return normalizeResearchResult(parseJsonObject(text));
 }
 
 function mergeDeepOwnership(base: PropertyResearchResult, deep: PropertyResearchResult) {
@@ -791,11 +873,12 @@ Search independently across these source families:
 4. Entity verification: official Secretary of State/business registry records when a candidate owner is an LLC, corporation, partnership, trust company, or nonprofit.
 5. Search-engine variations: quote the full address; search street abbreviations and full street names; search APN with punctuation, without punctuation, and grouped differently; combine each with owner, owned by, property record, sale, transferred, grantee, parcel, permit, and tax.
 
-Do not stop after one portal blocks access or returns nothing. Try other named sources and at least two materially different query patterns. Search snippets can guide discovery but cannot support the final owner name unless the linked exact-property page or document is consulted.
+Do not stop after one portal blocks access or returns nothing. Try other named sources and at least two materially different query patterns. A search-index snippet may support a low-confidence owner only when it visibly includes the exact full property address, an explicit current-owner label, the owner name, and a current date or ownership range. Preserve the linked exact-property URL and state that the evidence came from the index snippet.
 
 Evidence rules:
 - A secondary source may populate owner_name only when it explicitly associates that name with the exact address or APN.
 - Homes.com and other exact-property pages are valid secondary evidence when they explicitly label the owner.
+- A Homes.com or comparable search-index result is valid low-confidence secondary evidence when the snippet itself displays the exact full address, "Current Owners" or an equally explicit ownership label, the owner name, and a current ownership date. Do not use ordinary resident, directory, or people-search snippets.
 - Confirm currentness against sale/transfer dates. A permit, directory, or archived listing dated before a later sale is historical only and must not be labeled current.
 - Prefer two independent secondary sources. If only one exact-property source is available, report it, label the source tier, and lower confidence.
 - If secondary sources conflict, return null for owner_name unless one is demonstrably newer; document every candidate and date in evidence and explain the conflict.
@@ -1072,6 +1155,14 @@ Return only one valid JSON object with this exact shape: {"summary":string,"iden
   try { result = normalizeResearchResult(parseJsonObject(text)); }
   catch { throw new Error("The property search could not organize its findings. Please try once more."); }
   result = await enrichResearchWithRentCast(result, env, input.queryType === "address" ? input.queryText : "");
+  if (!String(result.ownership?.owner_name ?? "").trim() && result.ownership?.rentcast_owner_found !== true) {
+    try { result = mergeHomesFallback(result, await runHomesFallbackResearch(env, input, result)); }
+    catch (reason) {
+      const ownership = result.ownership ?? (result.ownership = {});
+      ownership.homes_backup_checked = true;
+      ownership.homes_backup_status = `Homes.com backup could not finish: ${reason instanceof Error ? reason.message : "unknown error"}`.slice(0, 500);
+    }
+  }
   const ownerName = String(result.ownership?.owner_name ?? "").trim();
   const ownerConfidence = String(result.ownership?.ownership_confidence ?? "").toLowerCase();
   if (!ownerName || ownerConfidence !== "high") {
