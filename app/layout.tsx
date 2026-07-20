@@ -6,8 +6,8 @@ export const metadata: Metadata = {
   title: "Pauli HQ",
   description: "The Pauli family home for what comes next.",
   icons: {
-    icon: "/favicon.svg",
-    shortcut: "/favicon.svg",
+    icon: [{ url: "/app-icon-192.png?v=2", sizes: "192x192", type: "image/png" }],
+    shortcut: [{ url: "/app-icon-192.png?v=2", sizes: "192x192", type: "image/png" }],
     apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
   manifest: "/site.webmanifest",

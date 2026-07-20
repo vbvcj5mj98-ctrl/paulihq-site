@@ -51,9 +51,14 @@ export default function ParcelScoutPage() {
   const [current, setCurrent] = useState<Research | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 20, period: "" });
   const [rentCastUsage, setRentCastUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
+  const [ownerEvidenceUsage, setOwnerEvidenceUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [addressBusy, setAddressBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [evidenceBusy, setEvidenceBusy] = useState(false);
+  const [evidenceText, setEvidenceText] = useState("");
+  const [evidenceImage, setEvidenceImage] = useState("");
+  const [evidenceFileName, setEvidenceFileName] = useState("");
   const [error, setError] = useState("");
   const sessionToken = useRef(crypto.randomUUID());
   const suppressSuggestions = useRef(false);
@@ -61,9 +66,9 @@ export default function ParcelScoutPage() {
   const loadHistory = useCallback(async () => {
     const response = await fetch("/api/property-research");
     if (response.status === 401) return window.location.assign("/login");
-    const data = await response.json() as { researches?: Research[]; usage?: Usage; rentCastUsage?: Usage; error?: string };
+    const data = await response.json() as { researches?: Research[]; usage?: Usage; rentCastUsage?: Usage; ownerEvidenceUsage?: Usage; error?: string };
     if (!response.ok) throw new Error(data.error || "Unable to load Parcel Scout.");
-    setResearches(data.researches ?? []); if (data.usage) setUsage(data.usage); if (data.rentCastUsage) setRentCastUsage(data.rentCastUsage);
+    setResearches(data.researches ?? []); if (data.usage) setUsage(data.usage); if (data.rentCastUsage) setRentCastUsage(data.rentCastUsage); if (data.ownerEvidenceUsage) setOwnerEvidenceUsage(data.ownerEvidenceUsage);
   }, []);
 
   useEffect(() => { loadHistory().catch((reason: Error) => setError(reason.message)); }, [loadHistory]);
@@ -103,7 +108,35 @@ export default function ParcelScoutPage() {
   }
 
   function openResearch(research: Research) {
-    setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setError(""); window.scrollTo({ top: 0, behavior: "smooth" });
+    setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); setError(""); window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function chooseEvidenceImage(file?: File) {
+    setError("");
+    if (!file) { setEvidenceImage(""); setEvidenceFileName(""); return; }
+    if (!/^image\/(png|jpeg|webp)$/i.test(file.type) || file.size > 4 * 1024 * 1024) {
+      setEvidenceImage(""); setEvidenceFileName(""); setError("Use a PNG, JPEG, or WebP screenshot smaller than 4 MB."); return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => { setEvidenceImage(String(reader.result ?? "")); setEvidenceFileName(file.name); };
+    reader.onerror = () => setError("That screenshot could not be read.");
+    reader.readAsDataURL(file);
+  }
+
+  async function verifyEvidence() {
+    if (!current) return;
+    if (!evidenceText.trim() && !evidenceImage) return setError("Paste the visible ownership result or attach a screenshot.");
+    setEvidenceBusy(true); setError("");
+    const target = String(current.result.identity?.address || current.query_text);
+    const sourceUrl = `https://www.google.com/search?q=${encodeURIComponent(`"${target}" "Ownership History" "Current Owners"`)}`;
+    const response = await fetch("/api/property-owner-evidence", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ researchId: current.id, evidenceText, imageDataUrl: evidenceImage, sourceUrl }) });
+    const data = await response.json() as { id?: number; result?: ResearchResult; starred?: boolean; refreshedAt?: number; error?: string };
+    if (!response.ok || !data.result) setError(data.error || "Unable to verify that ownership evidence.");
+    else {
+      setCurrent({ ...current, result: data.result, starred: Boolean(data.starred), refreshed_at: data.refreshedAt ?? Date.now() });
+      setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); await loadHistory();
+    }
+    setEvidenceBusy(false);
   }
 
   async function toggleStar() {
@@ -134,6 +167,9 @@ export default function ParcelScoutPage() {
   const comparableSales = Array.isArray(financial.comparable_sales) ? financial.comparable_sales as ComparableSale[] : [];
   const contactOptions = Array.isArray(ownership.contact_options) ? ownership.contact_options as ContactOption[] : [];
   const additionalOwners = Array.isArray(ownership.additional_owners) ? ownership.additional_owners.join(", ") : ownership.additional_owners;
+  const evidenceTarget = String(identity.address || current?.query_text || queryText);
+  const ownershipSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(`"${evidenceTarget}" "Ownership History" "Current Owners"`)}`;
+  const countySearchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${String(identity.county || current?.county || county)} County ${String(identity.state || current?.state || state)} assessor property search ${evidenceTarget}`)}`;
 
   return <main className="properties-page scout-page">
     <header className="properties-header"><HqHomeLink /><HqMenu current="/parcel-scout" /></header>
@@ -151,6 +187,14 @@ export default function ParcelScoutPage() {
       {current && result && <article className="scout-report">
         <header className="scout-report-header"><div><small>{current.query_type === "apn" ? `APN ${current.query_text}` : "Property report"}</small><h2>{String(identity.address || current.query_text)}</h2><p>{result.summary || "Source-backed property details found during this investigation."}</p></div><div className="scout-report-actions"><button className={current.starred ? "starred" : ""} onClick={toggleStar} aria-pressed={Boolean(current.starred)}>{current.starred ? "★ Starred" : "☆ Star"}</button><button onClick={() => investigate(undefined, true)} disabled={busy}>Refresh research</button></div></header>
         <div className="scout-report-grid">
+          <section className="scout-owner-evidence-panel">
+            <div><p className="kicker">When automatic records are unavailable</p><h3>Add visible ownership evidence</h3><p>Open either search, then paste the visible ownership line or attach a screenshot. Parcel Scout verifies the exact address or APN before saving the owner.</p></div>
+            <div className="scout-evidence-links"><a href={ownershipSearchUrl} target="_blank" rel="noreferrer">Open exact ownership search ↗</a><a href={countySearchUrl} target="_blank" rel="noreferrer">Open county record search ↗</a></div>
+            <label>Visible ownership text<textarea value={evidenceText} onChange={(event) => setEvidenceText(event.target.value)} placeholder="Example: Ownership History. Current Owners Feb 2025 - Present…" rows={4} /></label>
+            <label className="scout-evidence-file">Ownership screenshot<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => chooseEvidenceImage(event.target.files?.[0])} /><span>{evidenceFileName || "Choose screenshot"}</span></label>
+            <button type="button" className="scout-evidence-submit" onClick={verifyEvidence} disabled={evidenceBusy || (!evidenceText.trim() && !evidenceImage)}>{evidenceBusy ? "Verifying…" : "Verify and save owner"}</button>
+            <small>Evidence verifications: {ownerEvidenceUsage.requests} of {ownerEvidenceUsage.limit} this month. Screenshots are analyzed but not stored; only the verified result and source link are saved.</small>
+          </section>
           <section><h3>Parcel identity</h3><DetailGrid values={[["Address", identity.address], ["APN", identity.apn], ["County", identity.county], ["State", identity.state]]} /></section>
           <section><h3>Property</h3><DetailGrid values={[["Type", property.property_type], ["Lot size", property.lot_size_acres, "number"], ["Lot square feet", property.lot_size_sqft, "number"], ["Bedrooms", property.beds, "number"], ["Bathrooms", property.baths, "number"], ["Interior square feet", property.square_feet, "number"], ["Year built", property.year_built, "number"], ["Garage spaces", property.garage_spaces, "number"], ["Garage square feet", property.garage_sqft, "number"]]} /></section>
           <section className="scout-owner"><h3>Owner intelligence</h3><DetailGrid values={[["Current owner", ownership.owner_name], ["Additional owners", additionalOwners], ["Owner type", ownership.owner_type], ["Confidence", ownership.ownership_confidence], ["Source level", ownership.ownership_source_tier], ["RentCast checked", ownership.rentcast_checked, "yesno"], ["RentCast owner found", ownership.rentcast_owner_found, "yesno"], ["Homes.com backup", ownership.homes_backup_status], ["Official record found", ownership.official_record_found, "yesno"], ["Secondary record found", ownership.secondary_record_found, "yesno"], ["Record as of", ownership.record_as_of], ["Latest deed grantee", ownership.deed_grantee], ["Deed recorded", ownership.deed_recorded_date], ["Deed instrument", ownership.deed_instrument], ["Legal entity", ownership.entity_legal_name], ["Entity status", ownership.entity_status], ["Entity jurisdiction", ownership.entity_jurisdiction], ["Public business phone", ownership.public_business_phone], ["Public business email", ownership.public_business_email], ["Business website", ownership.public_business_website], ["Contact guidance", ownership.contact_guidance], ["Search summary", ownership.search_summary], ["Research notes", ownership.ownership_notes]]} />{present(ownership.homes_source_url) && <a className="scout-source-link" href={String(ownership.homes_source_url)} target="_blank" rel="noreferrer">Open Homes.com backup ↗</a>}{present(ownership.ownership_record_url) && <a className="scout-source-link" href={String(ownership.ownership_record_url)} target="_blank" rel="noreferrer">Open best ownership record ↗</a>}{contactOptions.length > 0 && <div className="scout-owner-evidence"><h4>Public contact options</h4>{contactOptions.map((contact, index) => <a href={contact.url || contact.source_url} target="_blank" rel="noreferrer" key={`${contact.source_url}-${contact.value}-${index}`}><strong>{contact.label || contact.contact_type || "Contact option"}</strong><small>{[contact.value, contact.relationship, contact.source_title].filter(Boolean).join(" · ")}</small><b>↗</b></a>)}</div>}{ownershipEvidence.length > 0 && <div className="scout-owner-evidence"><h4>Ownership evidence</h4>{ownershipEvidence.map((evidence, index) => <a href={evidence.url} target="_blank" rel="noreferrer" key={`${evidence.url}-${index}`}><strong>{evidence.title || "Public ownership record"}</strong><small>{[evidence.source_kind, evidence.name, evidence.record_date, evidence.supports].filter(Boolean).join(" · ")}</small><b>↗</b></a>)}</div>}</section>
