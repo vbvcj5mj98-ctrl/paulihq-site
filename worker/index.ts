@@ -8,6 +8,7 @@ interface Env {
   SETUP_CODE?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
+  PROPERTY_RESEARCH_MODEL?: string;
   RENTCAST_API_KEY?: string;
   GOOGLE_MAPS_API_KEY?: string;
 }
@@ -505,11 +506,29 @@ function normalizeResearchResult(result: PropertyResearchResult) {
     entity_legal_name: ownershipRaw.entity_legal_name ?? null,
     entity_status: ownershipRaw.entity_status ?? null,
     entity_jurisdiction: ownershipRaw.entity_jurisdiction ?? null,
+    ownership_source_tier: ownershipRaw.ownership_source_tier ?? null,
+    official_record_found: typeof ownershipRaw.official_record_found === "boolean" ? ownershipRaw.official_record_found : null,
+    secondary_record_found: typeof ownershipRaw.secondary_record_found === "boolean" ? ownershipRaw.secondary_record_found : null,
+    search_summary: ownershipRaw.search_summary ?? null,
     ownership_notes: ownershipRaw.ownership_notes ?? null,
     ownership_record_url: cleanUrl(ownershipRaw.ownership_record_url) || evidence.find((item) => /assessor|tax|recorder|deed/i.test(item.source_kind))?.url || null,
     public_business_phone: ownershipRaw.public_business_phone ?? null,
     public_business_email: ownershipRaw.public_business_email ?? null,
     public_business_website: cleanUrl(ownershipRaw.public_business_website) || null,
+    contact_guidance: ownershipRaw.contact_guidance ?? null,
+    contact_options: Array.isArray(ownershipRaw.contact_options) ? ownershipRaw.contact_options.map((item) => {
+      const contact = object(item);
+      return {
+        contact_type: String(contact.contact_type ?? "public contact route").slice(0, 80),
+        label: String(contact.label ?? "Contact option").slice(0, 160),
+        value: contact.value ? String(contact.value).slice(0, 240) : null,
+        url: cleanUrl(contact.url) || null,
+        source_title: String(contact.source_title ?? "Published source").slice(0, 160),
+        source_url: cleanUrl(contact.source_url),
+        relationship: contact.relationship ? String(contact.relationship).slice(0, 180) : null,
+        is_business_contact: contact.is_business_contact === true,
+      };
+    }).filter((item) => item.source_url && (item.is_business_contact || /agent|broker|contact form|government office/i.test(item.contact_type))).slice(0, 10) : [],
     evidence,
   };
   financial.valuation_evidence = Array.isArray(financial.valuation_evidence) ? financial.valuation_evidence.map((item) => {
@@ -521,8 +540,26 @@ function normalizeResearchResult(result: PropertyResearchResult) {
       as_of: valuation.as_of ? String(valuation.as_of).slice(0, 40) : null,
       url: cleanUrl(valuation.url),
       notes: valuation.notes ? String(valuation.notes).slice(0, 260) : null,
+      independent_source_group: valuation.independent_source_group ? String(valuation.independent_source_group).slice(0, 100) : null,
     };
   }).filter((item) => item.url && item.value !== null).slice(0, 10) : [];
+  financial.comparable_sales = Array.isArray(financial.comparable_sales) ? financial.comparable_sales.map((item) => {
+    const comparable = object(item);
+    return {
+      address: String(comparable.address ?? "Comparable property").slice(0, 180),
+      sale_price: finiteNumber(comparable.sale_price),
+      sale_date: comparable.sale_date ? String(comparable.sale_date).slice(0, 40) : null,
+      distance_miles: finiteNumber(comparable.distance_miles),
+      beds: finiteNumber(comparable.beds),
+      baths: finiteNumber(comparable.baths),
+      square_feet: finiteNumber(comparable.square_feet),
+      lot_size_acres: finiteNumber(comparable.lot_size_acres),
+      source_name: String(comparable.source_name ?? "Comparable source").slice(0, 140),
+      url: cleanUrl(comparable.url),
+      similarity_notes: comparable.similarity_notes ? String(comparable.similarity_notes).slice(0, 280) : null,
+    };
+  }).filter((item) => item.url && item.sale_price !== null).slice(0, 8) : [];
+  financial.independent_estimate_count = Math.max(0, Math.min(20, Number(financial.independent_estimate_count) || 0));
   financial.market_context = Array.isArray(financial.market_context) ? financial.market_context.map((item) => {
     const trend = object(item);
     return {
@@ -606,6 +643,335 @@ async function enrichResearchWithRentCast(result: PropertyResearchResult, env: E
   return result;
 }
 
+function mergeDeepOwnership(base: PropertyResearchResult, deep: PropertyResearchResult) {
+  const baseOwner = base.ownership ?? (base.ownership = {});
+  const deepOwner = deep.ownership ?? {};
+  const baseEvidence = Array.isArray(baseOwner.evidence) ? baseOwner.evidence : [];
+  const deepEvidence = Array.isArray(deepOwner.evidence) ? deepOwner.evidence : [];
+  if (deepOwner.owner_name || deepOwner.deed_grantee || deepEvidence.length) {
+    base.ownership = { ...baseOwner, ...deepOwner, evidence: [...deepEvidence, ...baseEvidence].filter((item, index, items) => {
+      const url = String((item as Record<string, unknown>)?.url ?? "");
+      return Boolean(url) && items.findIndex((candidate) => String((candidate as Record<string, unknown>)?.url ?? "") === url) === index;
+    }).slice(0, 10) };
+  } else if (deepOwner.search_summary || deepOwner.ownership_notes) {
+    base.ownership = {
+      ...baseOwner,
+      search_summary: deepOwner.search_summary ?? baseOwner.search_summary,
+      ownership_notes: [baseOwner.ownership_notes, deepOwner.ownership_notes].filter(Boolean).join(" ").slice(0, 1_000) || null,
+    };
+  }
+  const baseIdentity = base.identity ?? (base.identity = {});
+  for (const [key, value] of Object.entries(deep.identity ?? {})) setWhenMissing(baseIdentity, key, value);
+  const allSources = [...(deep.sources ?? []), ...(base.sources ?? [])];
+  base.sources = allSources.filter((source, index, items) => Boolean(source.url) && items.findIndex((candidate) => candidate.url === source.url) === index).slice(0, 25);
+  if (base.ownership?.owner_name) base.missing_fields = (base.missing_fields ?? []).filter((field) => !/owner|ownership/i.test(field));
+  return base;
+}
+
+async function runDeepOwnershipResearch(env: Env, input: ResearchInput, base: PropertyResearchResult) {
+  const address = String(base.identity?.address ?? (input.queryType === "address" ? input.queryText : "")).trim();
+  const apn = String(base.identity?.apn ?? (input.queryType === "apn" ? input.queryText : "")).trim();
+  const county = String(base.identity?.county ?? input.county).trim();
+  const state = String(base.identity?.state ?? input.state).trim();
+  const apnDigits = apn.replace(/\D/g, "");
+  const subject = [`Address: ${address || "unknown"}`, `APN: ${apn || "unknown"}`, `APN digits: ${apnDigits || "unknown"}`, `County: ${county || "unknown"}`, `State: ${state || "unknown"}`].join("\n");
+  const fallbackModel = env.OPENAI_MODEL || "gpt-5.4-mini";
+  const preferredModel = env.PROPERTY_RESEARCH_MODEL || "gpt-5.6-terra";
+
+  async function requestOwnership(model: string) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        tools: [{ type: "web_search" }],
+        max_tool_calls: 12,
+        include: ["web_search_call.action.sources"],
+        instructions: `Find the latest publicly reported owner of one exact US parcel. This is a dedicated ownership pass; do not spend searches on valuation, neighborhood trends, photos, or general property description.
+
+Success means either (a) a supported owner name with dated exact-parcel evidence or (b) a clear account of which relevant source types were checked and why ownership remains unverified.
+
+Search strategy:
+- Search the exact quoted street address with city/state and the terms owner, property record, assessor, parcel, tax, deed, grantee, and permit.
+- Search the APN exactly as supplied, digits-only, and common punctuation variants with the county/state and the same ownership terms.
+- Identify the official county assessor, tax collector/treasurer, GIS/parcel viewer, recorder/register of deeds, and clerk portals. Search their indexed pages and downloadable documents.
+- Search exact-property pages on Homes.com, Redfin, Realtor.com, Zillow, LoopNet, and other reputable property portals. If one explicitly labels an owner for the exact address/APN, it is usable secondary evidence.
+- Search official city/county permit archives, agendas, notices, deed indexes, and PDFs containing the exact address or APN. Permit owner names are historical evidence only unless their date is newer than any recorded sale or transfer evidence.
+- If an entity owns the parcel, search the official state business registry for legal name, status, and jurisdiction.
+- Try meaningful query variations when an initial result is empty. Do not stop after checking only one portal or one spelling.
+
+Currentness and conflict rules:
+- Match both geography and exact address/APN. Never merge a nearby or similarly named parcel.
+- Compare every ownership record date against the latest sale or transfer date. Do not call a person the current owner when the only evidence predates a later sale.
+- Prefer official assessor/tax/recorder records. When those are inaccessible but an exact Homes.com or similar page explicitly reports an owner, return it as secondary evidence with ownership_source_tier set to "secondary exact-property record" and confidence medium or low.
+- If reliable sources disagree, describe the conflict and do not silently choose one. Use null if current ownership cannot be supported.
+- Every owner claim must have a direct HTTPS source in both evidence and sources.
+
+Privacy rules:
+- Publicly recorded owner names are allowed.
+- Never return a private phone number, email, personal mailing address, relative, employer, social profile, or people-search/data-broker result.
+- Business contact details are allowed only when published by the organization itself or an official registry.
+
+Confidence:
+- high only for a current official assessor, tax, or recorder record matching the parcel;
+- medium for exact, dated secondary property-record evidence that is consistent with transfer history;
+- low for dated or indirect evidence, including permits, without a current official confirmation.
+
+Return only one JSON object: {"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null},"ownership":{"owner_name":string|null,"additional_owners":string[],"owner_type":string|null,"ownership_confidence":"high"|"medium"|"low"|null,"ownership_source_tier":string|null,"official_record_found":boolean,"secondary_record_found":boolean,"record_as_of":string|null,"deed_grantee":string|null,"deed_recorded_date":string|null,"deed_instrument":string|null,"entity_legal_name":string|null,"entity_status":string|null,"entity_jurisdiction":string|null,"search_summary":string,"ownership_notes":string|null,"ownership_record_url":string|null,"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null,"evidence":[{"source_kind":string,"name":string|null,"record_date":string|null,"title":string,"url":string,"supports":string}]},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
+        input: `Investigate ownership for this exact parcel:\n${subject}`,
+      }),
+    });
+    const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+    return { response, payload };
+  }
+
+  let attempt = await requestOwnership(preferredModel);
+  const modelIssue = !attempt.response.ok && /model|access/i.test(`${attempt.payload.error?.code ?? ""} ${attempt.payload.error?.message ?? ""}`);
+  if (modelIssue && preferredModel !== fallbackModel) attempt = await requestOwnership(fallbackModel);
+  if (!attempt.response.ok) throw new Error(safeOpenAIError(attempt.response.status, attempt.payload));
+  const text = responseText(attempt.payload);
+  if (!text) throw new Error("The deep ownership search returned no usable information.");
+  return normalizeResearchResult(parseJsonObject(text));
+}
+
+async function runSecondaryOwnershipResearch(env: Env, input: ResearchInput, base: PropertyResearchResult) {
+  const address = String(base.identity?.address ?? (input.queryType === "address" ? input.queryText : "")).trim();
+  const apn = String(base.identity?.apn ?? (input.queryType === "apn" ? input.queryText : "")).trim();
+  const county = String(base.identity?.county ?? input.county).trim();
+  const state = String(base.identity?.state ?? input.state).trim();
+  const existingOwner = base.ownership ?? {};
+  const subject = [`Address: ${address || "unknown"}`, `APN: ${apn || "unknown"}`, `APN digits: ${apn.replace(/\D/g, "") || "unknown"}`, `County: ${county || "unknown"}`, `State: ${state || "unknown"}`, `Existing ownership candidate: ${JSON.stringify(existingOwner).slice(0, 3_000)}`].join("\n");
+  const fallbackModel = env.OPENAI_MODEL || "gpt-5.4-mini";
+  const preferredModel = env.PROPERTY_RESEARCH_MODEL || "gpt-5.6-terra";
+
+  async function requestOwnership(model: string) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        tools: [{ type: "web_search" }],
+        max_tool_calls: 14,
+        include: ["web_search_call.action.sources"],
+        instructions: `Perform an exhaustive secondary-source ownership sweep for one exact US parcel. An official-record pass has already run without producing a high-confidence answer. Focus only on ownership discovery and currentness.
+
+Search independently across these source families:
+1. Exact-property portals: Homes.com, Redfin, Realtor.com, Zillow, Trulia, LoopNet, PropertyShark, Movoto, Estately, Homesnap, Compass, and any exact-property page returned for the address or APN.
+2. Listing and transaction sources: local MLS/IDX pages, listing brokerage pages, buyer or seller brokerage pages, sold-listing archives, auction pages, and reputable property-data pages.
+3. Government-adjacent public documents: city/county permit archives, building department records, tax-sale records, planning packets, code-enforcement documents, public notices, agendas, minutes, recorded maps, and downloadable PDFs containing the exact address or APN.
+4. Entity verification: official Secretary of State/business registry records when a candidate owner is an LLC, corporation, partnership, trust company, or nonprofit.
+5. Search-engine variations: quote the full address; search street abbreviations and full street names; search APN with punctuation, without punctuation, and grouped differently; combine each with owner, owned by, property record, sale, transferred, grantee, parcel, permit, and tax.
+
+Do not stop after one portal blocks access or returns nothing. Try other named sources and at least two materially different query patterns. Search snippets can guide discovery but cannot support the final owner name unless the linked exact-property page or document is consulted.
+
+Evidence rules:
+- A secondary source may populate owner_name only when it explicitly associates that name with the exact address or APN.
+- Homes.com and other exact-property pages are valid secondary evidence when they explicitly label the owner.
+- Confirm currentness against sale/transfer dates. A permit, directory, or archived listing dated before a later sale is historical only and must not be labeled current.
+- Prefer two independent secondary sources. If only one exact-property source is available, report it, label the source tier, and lower confidence.
+- If secondary sources conflict, return null for owner_name unless one is demonstrably newer; document every candidate and date in evidence and explain the conflict.
+- Never merge a nearby parcel or a similar address.
+
+Privacy rules:
+- Publicly reported owner names are allowed.
+- Exclude people-search sites, reverse-phone sites, social media, personal contact details, relatives, mailing addresses, and inferred household members.
+- Business contact details are allowed only from the business itself or an official registry.
+
+Confidence rules:
+- medium: a current exact-property secondary record, preferably corroborated by another independent source and consistent with sale history;
+- low: one dated exact-property source or older public-document evidence without current corroboration;
+- never high, because this pass is secondary evidence.
+
+Return only one JSON object: {"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null},"ownership":{"owner_name":string|null,"additional_owners":string[],"owner_type":string|null,"ownership_confidence":"medium"|"low"|null,"ownership_source_tier":string|null,"official_record_found":false,"secondary_record_found":boolean,"record_as_of":string|null,"deed_grantee":string|null,"deed_recorded_date":string|null,"deed_instrument":string|null,"entity_legal_name":string|null,"entity_status":string|null,"entity_jurisdiction":string|null,"search_summary":string,"ownership_notes":string|null,"ownership_record_url":string|null,"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null,"evidence":[{"source_kind":string,"name":string|null,"record_date":string|null,"title":string,"url":string,"supports":string}]},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
+        input: `Find the best secondary ownership evidence for this exact parcel:\n${subject}`,
+      }),
+    });
+    const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+    return { response, payload };
+  }
+
+  let attempt = await requestOwnership(preferredModel);
+  const modelIssue = !attempt.response.ok && /model|access/i.test(`${attempt.payload.error?.code ?? ""} ${attempt.payload.error?.message ?? ""}`);
+  if (modelIssue && preferredModel !== fallbackModel) attempt = await requestOwnership(fallbackModel);
+  if (!attempt.response.ok) throw new Error(safeOpenAIError(attempt.response.status, attempt.payload));
+  const text = responseText(attempt.payload);
+  if (!text) throw new Error("The secondary ownership sweep returned no usable information.");
+  return normalizeResearchResult(parseJsonObject(text));
+}
+
+function mergeOwnerContacts(base: PropertyResearchResult, contactResult: PropertyResearchResult) {
+  const owner = base.ownership ?? (base.ownership = {});
+  const contacts = contactResult.ownership ?? {};
+  setWhenMissing(owner, "public_business_phone", contacts.public_business_phone);
+  setWhenMissing(owner, "public_business_email", contacts.public_business_email);
+  setWhenMissing(owner, "public_business_website", contacts.public_business_website);
+  setWhenMissing(owner, "contact_guidance", contacts.contact_guidance);
+  const baseOptions = Array.isArray(owner.contact_options) ? owner.contact_options : [];
+  const newOptions = Array.isArray(contacts.contact_options) ? contacts.contact_options : [];
+  owner.contact_options = [...newOptions, ...baseOptions].filter((item, index, items) => {
+    const record = item as Record<string, unknown>;
+    const key = `${record.source_url ?? ""}|${record.value ?? ""}|${record.url ?? ""}`;
+    return Boolean(key.replaceAll("|", "")) && items.findIndex((candidate) => {
+      const other = candidate as Record<string, unknown>;
+      return `${other.source_url ?? ""}|${other.value ?? ""}|${other.url ?? ""}` === key;
+    }) === index;
+  }).slice(0, 10);
+  const allSources = [...(contactResult.sources ?? []), ...(base.sources ?? [])];
+  base.sources = allSources.filter((source, index, items) => Boolean(source.url) && items.findIndex((candidate) => candidate.url === source.url) === index).slice(0, 25);
+  return base;
+}
+
+async function runOwnerContactResearch(env: Env, base: PropertyResearchResult) {
+  const ownerName = String(base.ownership?.owner_name ?? "").trim();
+  const ownerType = String(base.ownership?.owner_type ?? "").trim();
+  const address = String(base.identity?.address ?? "").trim();
+  const apn = String(base.identity?.apn ?? "").trim();
+  const state = String(base.identity?.state ?? "").trim();
+  const subject = [`Recorded owner: ${ownerName}`, `Owner type: ${ownerType || "unknown"}`, `Property: ${address || "unknown"}`, `APN: ${apn || "unknown"}`, `State: ${state || "unknown"}`].join("\n");
+  const fallbackModel = env.OPENAI_MODEL || "gpt-5.4-mini";
+  const preferredModel = env.PROPERTY_RESEARCH_MODEL || "gpt-5.6-terra";
+
+  async function requestContacts(model: string) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        tools: [{ type: "web_search" }],
+        max_tool_calls: 8,
+        include: ["web_search_call.action.sources"],
+        instructions: `Find legitimate public contact routes associated with a verified property owner. Ownership has already been established; do not redo ownership or property valuation research.
+
+Search order:
+1. If the owner is an entity, search the official state business registry, the entity's official website, its official contact page, and clearly associated professional profiles or licensing registries.
+2. Search exact current/sold listing pages for a published listing agent and brokerage contact route connected to the property.
+3. Search the owner organization's official website, public business phone, public business email, and contact form.
+4. If no direct public business route exists, identify a legitimate intermediary such as the listing brokerage or relevant county assessor/recorder office and explain the route in contact_guidance.
+
+Verification requirements:
+- Every contact option must have a consulted HTTPS source and a clear relationship to the owner or property.
+- Mark is_business_contact true only for an organization, licensed professional, listing agent/brokerage, or contact explicitly published for business use.
+- Do not assume that a same-name person or business is the owner. Exclude ambiguous matches.
+
+Privacy boundary:
+- Never use people-search sites, reverse-phone/email services, data brokers, social media, relatives, neighbors, personal mailing addresses, personal phone numbers, or personal email addresses.
+- Do not return registered-agent home addresses or an individual's personal contact details even if a database displays them.
+- For a private individual without a verified public business connection, leave direct phone/email null and provide a safe intermediary route.
+
+Return only one JSON object: {"ownership":{"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null,"contact_guidance":string|null,"contact_options":[{"contact_type":string,"label":string,"value":string|null,"url":string|null,"source_title":string,"source_url":string,"relationship":string|null,"is_business_contact":boolean}]},"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
+        input: `Find verified public contact routes for this owner and property:\n${subject}`,
+      }),
+    });
+    const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+    return { response, payload };
+  }
+
+  let attempt = await requestContacts(preferredModel);
+  const modelIssue = !attempt.response.ok && /model|access/i.test(`${attempt.payload.error?.code ?? ""} ${attempt.payload.error?.message ?? ""}`);
+  if (modelIssue && preferredModel !== fallbackModel) attempt = await requestContacts(fallbackModel);
+  if (!attempt.response.ok) throw new Error(safeOpenAIError(attempt.response.status, attempt.payload));
+  const text = responseText(attempt.payload);
+  if (!text) throw new Error("The public contact search returned no usable information.");
+  return normalizeResearchResult(parseJsonObject(text));
+}
+
+function mergeDeepValuation(base: PropertyResearchResult, deep: PropertyResearchResult) {
+  const baseFinancial = base.financial ?? (base.financial = {});
+  const deepFinancial = deep.financial ?? {};
+  const baseEvidence = Array.isArray(baseFinancial.valuation_evidence) ? baseFinancial.valuation_evidence : [];
+  const deepEvidence = Array.isArray(deepFinancial.valuation_evidence) ? deepFinancial.valuation_evidence : [];
+  const baseComps = Array.isArray(baseFinancial.comparable_sales) ? baseFinancial.comparable_sales : [];
+  const deepComps = Array.isArray(deepFinancial.comparable_sales) ? deepFinancial.comparable_sales : [];
+  const baseContext = Array.isArray(baseFinancial.market_context) ? baseFinancial.market_context : [];
+  const deepContext = Array.isArray(deepFinancial.market_context) ? deepFinancial.market_context : [];
+  const unique = (items: unknown[], key: (item: Record<string, unknown>) => string, limit: number) => items.filter((item, index, all) => {
+    const value = key(item as Record<string, unknown>);
+    return Boolean(value) && all.findIndex((candidate) => key(candidate as Record<string, unknown>) === value) === index;
+  }).slice(0, limit);
+  base.financial = {
+    ...baseFinancial,
+    ...deepFinancial,
+    valuation_evidence: unique([...deepEvidence, ...baseEvidence], (item) => `${item.url ?? ""}|${item.value ?? ""}`, 10),
+    comparable_sales: unique([...deepComps, ...baseComps], (item) => `${item.url ?? ""}|${item.address ?? ""}`, 8),
+    market_context: unique([...deepContext, ...baseContext], (item) => `${item.url ?? ""}|${item.metric ?? ""}|${item.area_name ?? ""}`, 12),
+  };
+  const allSources = [...(deep.sources ?? []), ...(base.sources ?? [])];
+  base.sources = allSources.filter((source, index, items) => Boolean(source.url) && items.findIndex((candidate) => candidate.url === source.url) === index).slice(0, 25);
+  return base;
+}
+
+async function runDeepValuationResearch(env: Env, input: ResearchInput, base: PropertyResearchResult) {
+  const address = String(base.identity?.address ?? (input.queryType === "address" ? input.queryText : "")).trim();
+  const apn = String(base.identity?.apn ?? (input.queryType === "apn" ? input.queryText : "")).trim();
+  const county = String(base.identity?.county ?? input.county).trim();
+  const state = String(base.identity?.state ?? input.state).trim();
+  const property = base.property ?? {};
+  const existingFinancial = base.financial ?? {};
+  const subject = [`Address: ${address || "unknown"}`, `APN: ${apn || "unknown"}`, `County: ${county || "unknown"}`, `State: ${state || "unknown"}`, `Known characteristics: ${JSON.stringify(property).slice(0, 2_000)}`, `Existing value evidence: ${JSON.stringify(existingFinancial).slice(0, 3_000)}`].join("\n");
+  const fallbackModel = env.OPENAI_MODEL || "gpt-5.4-mini";
+  const preferredModel = env.PROPERTY_RESEARCH_MODEL || "gpt-5.6-terra";
+
+  async function requestValuation(model: string) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        tools: [{ type: "web_search" }],
+        max_tool_calls: 14,
+        include: ["web_search_call.action.sources"],
+        instructions: `Build a multi-source valuation report for one exact US property. A general property pass found fewer than three independent price references. Focus on pricing, comparable sales, and local market context; do not research ownership.
+
+Exact-property value sources to attempt independently:
+- Zillow Zestimate and exact Zillow property page;
+- Redfin Estimate and exact Redfin property page;
+- Realtor.com estimated value and exact property page;
+- Homes.com estimated value and exact property page;
+- Trulia, Movoto, Estately, Xome, RE/MAX, Rocket Homes, Chase Home Value Estimator, Bank of America Real Estate Center, PennyMac, and other reputable exact-property valuation pages when indexed and publicly accessible;
+- current listing price from the listing brokerage or MLS/IDX syndication;
+- latest recorded sale price and dated sale history;
+- official assessed value and official appraised/market value, kept clearly separate.
+
+Search rules:
+- Search the full quoted address and exact-property URL results. Search the APN as a fallback.
+- Try multiple named sources instead of stopping after the first estimate or blocked page.
+- A search-result snippet may guide discovery but cannot supply the final number unless the linked exact-property page is consulted.
+- Do not use a nearby property's estimate, an area median, or an undated number as the subject property's value.
+- Record the source name, value type, as-of date, direct URL, and any important limitation for every figure.
+- Use independent_source_group to identify shared estimate families when obvious; for example, Trulia and Zillow may not be independent. Count independent source groups, not merely website URLs.
+
+Comparable sales:
+- Find up to eight recently sold, genuinely similar properties. Prefer the same neighborhood and smallest reasonable radius, similar property type, living area, beds/baths, lot size, and recent sale date.
+- Include only a comp with a direct page showing the sale price and date. Explain why each comp is similar or materially different.
+- Do not call active listings comparable sales.
+
+Local trends:
+- Prefer ZIP-level trends, then city, county, or metro. Capture dated median sale price, median price per square foot, year-over-year change, days on market, sale-to-list ratio, and inventory when available.
+- Keep the geography, source, and as-of date attached to every metric. Trends are context, not the property's value.
+
+Reconciliation:
+- Keep assessed value, prior sale, list price, AVMs, and comps separate.
+- Synthesize estimated_value and a defensible value_range_low/high from current market-oriented evidence. Weight recent similar sold comps and multiple independent exact-property estimates more heavily than assessed value or an old sale.
+- Set value_confidence high only with several current, consistent independent sources and useful comps; medium with partial but credible evidence; low when sparse or conflicting.
+- Explain the weighting, disagreements, exclusions, and data limitations in valuation_method_summary and value_notes. Never average blindly and never invent a value.
+
+Return only one JSON object: {"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null},"financial":{"assessed_value":number|null,"land_value":number|null,"improvement_value":number|null,"assessment_year":number|null,"annual_tax":number|null,"tax_year":number|null,"estimated_value":number|null,"value_range_low":number|null,"value_range_high":number|null,"value_confidence":"high"|"medium"|"low"|null,"value_notes":string|null,"valuation_method_summary":string|null,"independent_estimate_count":number,"last_sale_price":number|null,"last_sale_date":string|null,"valuation_evidence":[{"source_name":string,"value":number,"value_type":string,"as_of":string|null,"url":string,"notes":string|null,"independent_source_group":string|null}],"comparable_sales":[{"address":string,"sale_price":number,"sale_date":string|null,"distance_miles":number|null,"beds":number|null,"baths":number|null,"square_feet":number|null,"lot_size_acres":number|null,"source_name":string,"url":string,"similarity_notes":string|null}],"market_context":[{"area_name":string,"geography_type":string,"metric":string,"value":number,"unit":string,"as_of":string|null,"source_name":string,"url":string,"notes":string|null}]},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
+        input: `Research pricing for this exact property:\n${subject}`,
+      }),
+    });
+    const payload = await response.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+    return { response, payload };
+  }
+
+  let attempt = await requestValuation(preferredModel);
+  const modelIssue = !attempt.response.ok && /model|access/i.test(`${attempt.payload.error?.code ?? ""} ${attempt.payload.error?.message ?? ""}`);
+  if (modelIssue && preferredModel !== fallbackModel) attempt = await requestValuation(fallbackModel);
+  if (!attempt.response.ok) throw new Error(safeOpenAIError(attempt.response.status, attempt.payload));
+  const text = responseText(attempt.payload);
+  if (!text) throw new Error("The deep pricing search returned no usable information.");
+  return normalizeResearchResult(parseJsonObject(text));
+}
+
 async function runPropertyResearch(env: Env, input: ResearchInput) {
   if (!env.OPENAI_API_KEY) throw new Error("The AI connection has not been added to Cloudflare yet.");
   const location = [input.county && `${input.county} County`, input.state].filter(Boolean).join(", ");
@@ -614,7 +980,7 @@ async function runPropertyResearch(env: Env, input: ResearchInput) {
     method: "POST",
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-5.4-mini",
+      model: env.PROPERTY_RESEARCH_MODEL || env.OPENAI_MODEL || "gpt-5.6-terra",
       tools: [{ type: "web_search" }],
       max_tool_calls: 10,
       include: ["web_search_call.action.sources"],
@@ -676,7 +1042,45 @@ Return only one valid JSON object with this exact shape: {"summary":string,"iden
   let result: PropertyResearchResult;
   try { result = normalizeResearchResult(parseJsonObject(text)); }
   catch { throw new Error("The property search could not organize its findings. Please try once more."); }
-  return enrichResearchWithRentCast(result, env, input.queryType === "address" ? input.queryText : "");
+  result = await enrichResearchWithRentCast(result, env, input.queryType === "address" ? input.queryText : "");
+  const ownerName = String(result.ownership?.owner_name ?? "").trim();
+  const ownerConfidence = String(result.ownership?.ownership_confidence ?? "").toLowerCase();
+  if (!ownerName || ownerConfidence !== "high") {
+    try { result = mergeDeepOwnership(result, await runDeepOwnershipResearch(env, input, result)); }
+    catch (reason) {
+      const ownership = result.ownership ?? (result.ownership = {});
+      ownership.search_summary = `The dedicated ownership pass could not finish: ${reason instanceof Error ? reason.message : "unknown error"}`.slice(0, 500);
+      result.missing_fields = [...new Set([...(result.missing_fields ?? []), "current ownership confirmation"])];
+    }
+  }
+  const officialOwnerName = String(result.ownership?.owner_name ?? "").trim();
+  const officialOwnerConfidence = String(result.ownership?.ownership_confidence ?? "").toLowerCase();
+  if (!officialOwnerName || officialOwnerConfidence !== "high") {
+    try { result = mergeDeepOwnership(result, await runSecondaryOwnershipResearch(env, input, result)); }
+    catch (reason) {
+      const ownership = result.ownership ?? (result.ownership = {});
+      ownership.search_summary = [ownership.search_summary, `The secondary ownership sweep could not finish: ${reason instanceof Error ? reason.message : "unknown error"}`].filter(Boolean).join(" ").slice(0, 800);
+    }
+  }
+  const resolvedOwner = String(result.ownership?.owner_name ?? "").trim();
+  const contactOptions = Array.isArray(result.ownership?.contact_options) ? result.ownership.contact_options : [];
+  if (resolvedOwner && !result.ownership?.public_business_phone && !result.ownership?.public_business_email && !result.ownership?.public_business_website && contactOptions.length === 0) {
+    try { result = mergeOwnerContacts(result, await runOwnerContactResearch(env, result)); }
+    catch (reason) {
+      const ownership = result.ownership ?? (result.ownership = {});
+      ownership.contact_guidance = `No verified public contact route was added during this search${reason instanceof Error ? `: ${reason.message}` : "."}`.slice(0, 500);
+    }
+  }
+  const valuationReferences = Array.isArray(result.financial?.valuation_evidence) ? result.financial.valuation_evidence : [];
+  const distinctValueSources = new Set(valuationReferences.map((item) => String((item as Record<string, unknown>)?.independent_source_group || (item as Record<string, unknown>)?.source_name || (item as Record<string, unknown>)?.url || "")).filter(Boolean));
+  if (distinctValueSources.size < 3) {
+    try { result = mergeDeepValuation(result, await runDeepValuationResearch(env, input, result)); }
+    catch (reason) {
+      const financial = result.financial ?? (result.financial = {});
+      financial.valuation_method_summary = [financial.valuation_method_summary, `The expanded pricing sweep could not finish: ${reason instanceof Error ? reason.message : "unknown error"}`].filter(Boolean).join(" ").slice(0, 800);
+    }
+  }
+  return normalizeResearchResult(result);
 }
 
 async function researchLookup(env: Env, username: string, input: ResearchInput) {
