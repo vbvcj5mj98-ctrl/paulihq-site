@@ -474,18 +474,77 @@ function cleanUrl(value: unknown) {
 function normalizeResearchResult(result: PropertyResearchResult) {
   const object = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const identity = object(result.identity);
-  const ownership = object(result.ownership);
+  const ownershipRaw = object(result.ownership);
   const property = object(result.property);
   const financial = object(result.financial);
   const listing = object(result.listing);
   const legal = object(result.legal);
-  ownership.public_business_website = cleanUrl(ownership.public_business_website) || null;
+  const evidence = Array.isArray(ownershipRaw.evidence) ? ownershipRaw.evidence.map((item) => {
+    const evidenceItem = object(item);
+    return {
+      source_kind: String(evidenceItem.source_kind ?? "public record").slice(0, 60),
+      name: evidenceItem.name ? String(evidenceItem.name).slice(0, 180) : null,
+      record_date: evidenceItem.record_date ? String(evidenceItem.record_date).slice(0, 40) : null,
+      title: String(evidenceItem.title ?? "Ownership source").slice(0, 180),
+      url: cleanUrl(evidenceItem.url),
+      supports: String(evidenceItem.supports ?? "Ownership information").slice(0, 260),
+    };
+  }).filter((item) => item.url).slice(0, 10) : [];
+  const confidence = String(ownershipRaw.ownership_confidence ?? "").toLowerCase();
+  const ownership = {
+    owner_name: ownershipRaw.owner_name ?? null,
+    additional_owners: Array.isArray(ownershipRaw.additional_owners)
+      ? ownershipRaw.additional_owners.map((item) => String(item).slice(0, 180)).filter(Boolean).slice(0, 10)
+      : [],
+    owner_type: ownershipRaw.owner_type ?? null,
+    ownership_confidence: ["high", "medium", "low"].includes(confidence) ? confidence : null,
+    record_as_of: ownershipRaw.record_as_of ?? null,
+    deed_grantee: ownershipRaw.deed_grantee ?? null,
+    deed_recorded_date: ownershipRaw.deed_recorded_date ?? null,
+    deed_instrument: ownershipRaw.deed_instrument ?? null,
+    entity_legal_name: ownershipRaw.entity_legal_name ?? null,
+    entity_status: ownershipRaw.entity_status ?? null,
+    entity_jurisdiction: ownershipRaw.entity_jurisdiction ?? null,
+    ownership_notes: ownershipRaw.ownership_notes ?? null,
+    ownership_record_url: cleanUrl(ownershipRaw.ownership_record_url) || evidence.find((item) => /assessor|tax|recorder|deed/i.test(item.source_kind))?.url || null,
+    public_business_phone: ownershipRaw.public_business_phone ?? null,
+    public_business_email: ownershipRaw.public_business_email ?? null,
+    public_business_website: cleanUrl(ownershipRaw.public_business_website) || null,
+    evidence,
+  };
+  financial.valuation_evidence = Array.isArray(financial.valuation_evidence) ? financial.valuation_evidence.map((item) => {
+    const valuation = object(item);
+    return {
+      source_name: String(valuation.source_name ?? "Value source").slice(0, 160),
+      value: finiteNumber(valuation.value),
+      value_type: String(valuation.value_type ?? "Published estimate").slice(0, 80),
+      as_of: valuation.as_of ? String(valuation.as_of).slice(0, 40) : null,
+      url: cleanUrl(valuation.url),
+      notes: valuation.notes ? String(valuation.notes).slice(0, 260) : null,
+    };
+  }).filter((item) => item.url && item.value !== null).slice(0, 10) : [];
+  financial.market_context = Array.isArray(financial.market_context) ? financial.market_context.map((item) => {
+    const trend = object(item);
+    return {
+      area_name: String(trend.area_name ?? "Local market").slice(0, 120),
+      geography_type: String(trend.geography_type ?? "area").slice(0, 40),
+      metric: String(trend.metric ?? "market trend").slice(0, 100),
+      value: finiteNumber(trend.value),
+      unit: String(trend.unit ?? "").slice(0, 40),
+      as_of: trend.as_of ? String(trend.as_of).slice(0, 40) : null,
+      source_name: String(trend.source_name ?? "Market source").slice(0, 160),
+      url: cleanUrl(trend.url),
+      notes: trend.notes ? String(trend.notes).slice(0, 240) : null,
+    };
+  }).filter((item) => item.url && item.value !== null).slice(0, 12) : [];
+  const valueConfidence = String(financial.value_confidence ?? "").toLowerCase();
+  financial.value_confidence = ["high", "medium", "low"].includes(valueConfidence) ? valueConfidence : null;
   listing.listing_url = cleanUrl(listing.listing_url) || null;
   const sources = Array.isArray(result.sources) ? result.sources.map((source) => ({
     title: String(source?.title ?? "Source").slice(0, 160),
     url: cleanUrl(source?.url),
     supports: Array.isArray(source?.supports) ? source.supports.map((item) => String(item).slice(0, 100)).slice(0, 12) : [],
-  })).filter((source) => source.url).slice(0, 15) : [];
+  })).filter((source) => source.url).slice(0, 25) : [];
   return {
     summary: String(result.summary ?? "").slice(0, 2_000),
     identity,
@@ -557,9 +616,56 @@ async function runPropertyResearch(env: Env, input: ResearchInput) {
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
       tools: [{ type: "web_search" }],
-      max_tool_calls: 4,
+      max_tool_calls: 10,
       include: ["web_search_call.action.sources"],
-      instructions: `Research one exact US property using public web sources. Search official county assessor, tax, recorder, and GIS sources first; then current real-estate listings and the listing brokerage. Match the exact APN/address and jurisdiction. Never merge facts from similarly named properties. Report only facts supported by a source. Use null for unknown values and list important unknowns in missing_fields. Do not infer bedrooms, bathrooms, garage, acreage, ownership, value, sale status, or contact details. Owner names may be reported from public property records. Never return a private individual's phone number, email, social profile, or mailing address. Owner contact fields may contain only an explicitly published business/organization contact. Listing-agent contact may contain only professional contact information published with the listing. Return only one valid JSON object with this exact shape: {"summary":string,"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null,"latitude":number|null,"longitude":number|null},"ownership":{"owner_name":string|null,"owner_type":string|null,"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null},"property":{"property_type":string|null,"lot_size_acres":number|null,"lot_size_sqft":number|null,"beds":number|null,"baths":number|null,"square_feet":number|null,"year_built":number|null,"garage_spaces":number|null,"garage_sqft":number|null},"financial":{"assessed_value":number|null,"land_value":number|null,"improvement_value":number|null,"assessment_year":number|null,"annual_tax":number|null,"tax_year":number|null,"estimated_value":number|null,"last_sale_price":number|null,"last_sale_date":string|null},"listing":{"for_sale":boolean|null,"status":string|null,"price":number|null,"listing_url":string|null,"agent_name":string|null,"brokerage":string|null,"professional_phone":string|null,"professional_email":string|null},"legal":{"legal_description":string|null,"zoning":string|null,"subdivision":string|null},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}. Every source URL must be a page you actually consulted.`,
+      instructions: `Investigate one exact US property and produce a source-backed property and ownership report.
+
+Success means:
+- identify the exact parcel by APN, address, county, and state without mixing in a similarly named property;
+- make ownership the highest-priority research area;
+- show who the latest public record names, the record date, the evidence chain, and a confidence level;
+- compare multiple independently published value references when available, with a date and source for every figure;
+- report conflicts or stale records instead of silently choosing one;
+- use null for anything not supported by a consulted source.
+
+Ownership research:
+1. Search the exact APN both with and without punctuation, plus the exact normalized address and jurisdiction.
+2. Prioritize official county assessor, tax collector, treasurer, GIS, and parcel portals. Look for the named owner and the record's as-of or tax year.
+3. Check an official county recorder, register of deeds, clerk, or deed-index source for the latest grantee, recording date, and instrument number when publicly searchable.
+4. If the owner is an LLC, corporation, partnership, nonprofit, or other entity, check the official Secretary of State or state business registry. Report the legal entity name, status, and jurisdiction. Use an official entity website only for explicitly published business contact details.
+5. Use current real-estate listings and brokerage pages as secondary evidence. Do not treat an unverified aggregator as stronger than an official record.
+6. If a result is empty, partial, or appears stale, try a meaningful alternate official source before stopping. Stop when ownership has strong exact-parcel evidence or the available public sources are exhausted.
+
+Value research:
+1. Collect distinct value references for the exact parcel: official assessed value, official appraised/market value when published, current listing price, latest recorded sale, and reputable public automated valuation estimates when accessible.
+2. Specifically attempt the exact-property Zillow Zestimate, Redfin Estimate, Realtor.com estimate, and Homes.com estimate. Include a figure only when the exact property page and value were actually consulted; never substitute a search-result snippet, nearby home, or generic area estimate. A blocked or unavailable estimate belongs in missing_fields, not in the report as a guessed number.
+3. Do not convert assessed value into market value unless an official source explicitly publishes both or supplies the jurisdiction's documented calculation. Do not invent a value from tax amounts.
+4. Keep different value types separate. A list price, assessed value, recorded sale, and automated estimate are not interchangeable.
+5. Prefer figures with a clear as-of date and a direct exact-property page. Exclude figures that cannot be tied to the exact APN/address.
+6. Provide value_range_low and value_range_high only from credible current market-oriented references. Weight exact-property sources by recency and relevance, not by brand name. Explain disagreement and the basis of the range in value_notes. If evidence is too weak, leave the range null.
+
+Local market context:
+1. Find dated local trends for the smallest reliable geography containing the property, preferring ZIP code, then city, then county or metro.
+2. Look for median sale price, median price per square foot, year-over-year price change, median days on market, sale-to-list ratio, and active inventory. Use reputable housing-market reports or official data and identify the geography and as-of date for each metric.
+3. Do not apply an area median directly as the property's value. Use local trends only as context for reconciling exact-property estimates.
+4. Do not mix metrics from different geographies or time periods without labeling them. If a metric is unavailable, omit it.
+
+Confidence rubric:
+- high: a current official assessor/tax/recorder record matches the exact parcel and jurisdiction;
+- medium: exact-parcel evidence is reliable but the official ownership record is dated, incomplete, or supported by only one usable source;
+- low: ownership is indirect, conflicting, or supported only by secondary sources;
+- never label ownership high without an official public record.
+
+Evidence and privacy rules:
+- Every factual owner claim must appear in ownership.evidence and in sources, with a direct HTTPS page actually consulted.
+- Label inference separately in ownership_notes. Do not present an inference as a recorded fact.
+- Owner names from public property records are allowed.
+- Never return a private individual's phone number, email, social profile, personal mailing address, relative, employer, or people-search/data-broker information.
+- Business contact fields may contain only contact details explicitly published by the owner organization itself or an official registry.
+- Listing-agent fields may contain only professional details published with the listing.
+- Do not infer bedrooms, bathrooms, garage, acreage, ownership, value, sale status, or contact details.
+
+Return only one valid JSON object with this exact shape: {"summary":string,"identity":{"address":string|null,"apn":string|null,"county":string|null,"state":string|null,"latitude":number|null,"longitude":number|null},"ownership":{"owner_name":string|null,"additional_owners":string[],"owner_type":string|null,"ownership_confidence":"high"|"medium"|"low"|null,"record_as_of":string|null,"deed_grantee":string|null,"deed_recorded_date":string|null,"deed_instrument":string|null,"entity_legal_name":string|null,"entity_status":string|null,"entity_jurisdiction":string|null,"ownership_notes":string|null,"ownership_record_url":string|null,"public_business_phone":string|null,"public_business_email":string|null,"public_business_website":string|null,"evidence":[{"source_kind":string,"name":string|null,"record_date":string|null,"title":string,"url":string,"supports":string}]},"property":{"property_type":string|null,"lot_size_acres":number|null,"lot_size_sqft":number|null,"beds":number|null,"baths":number|null,"square_feet":number|null,"year_built":number|null,"garage_spaces":number|null,"garage_sqft":number|null},"financial":{"assessed_value":number|null,"land_value":number|null,"improvement_value":number|null,"assessment_year":number|null,"annual_tax":number|null,"tax_year":number|null,"estimated_value":number|null,"value_range_low":number|null,"value_range_high":number|null,"value_confidence":"high"|"medium"|"low"|null,"value_notes":string|null,"last_sale_price":number|null,"last_sale_date":string|null,"valuation_evidence":[{"source_name":string,"value":number,"value_type":string,"as_of":string|null,"url":string,"notes":string|null}],"market_context":[{"area_name":string,"geography_type":string,"metric":string,"value":number,"unit":string,"as_of":string|null,"source_name":string,"url":string,"notes":string|null}]},"listing":{"for_sale":boolean|null,"status":string|null,"price":number|null,"listing_url":string|null,"agent_name":string|null,"brokerage":string|null,"professional_phone":string|null,"professional_email":string|null},"legal":{"legal_description":string|null,"zoning":string|null,"subdivision":string|null},"missing_fields":string[],"sources":[{"title":string,"url":string,"supports":string[]}]}.`,
       input: `Research this exact property: ${subject}`,
     }),
   });
