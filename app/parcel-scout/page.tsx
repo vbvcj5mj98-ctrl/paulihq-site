@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import AddressAutocomplete from "../AddressAutocomplete";
 import HqHomeLink from "../HqHomeLink";
 import HqMenu from "../HqMenu";
 
@@ -21,7 +22,6 @@ type Research = { id: number; query_type: "address" | "apn"; query_text: string;
 type ResearchSummary = Omit<Research, "result"> & { address?: string | null };
 type Depth = "quick" | "ownership" | "valuation";
 type Usage = { requests: number; limit: number; period: string };
-type AddressSuggestion = { placeId: string; text: string };
 type OwnershipEvidence = { source_kind?: string; name?: string | null; record_date?: string | null; title?: string; url?: string; supports?: string };
 type ValuationEvidence = { source_name?: string; value?: number | null; value_type?: string; as_of?: string | null; url?: string; notes?: string | null; independent_source_group?: string | null };
 type MarketContext = { area_name?: string; geography_type?: string; metric?: string; value?: number | null; unit?: string; as_of?: string | null; source_name?: string; url?: string; notes?: string | null };
@@ -59,7 +59,6 @@ export default function ParcelScoutPage() {
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 20, period: "" });
   const [rentCastUsage, setRentCastUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [ownerEvidenceUsage, setOwnerEvidenceUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
-  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [busy, setBusy] = useState<Depth | null>(null);
   const [opening, setOpening] = useState<number | null>(null);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
@@ -68,8 +67,6 @@ export default function ParcelScoutPage() {
   const [evidenceFileName, setEvidenceFileName] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const sessionToken = useRef(crypto.randomUUID());
-  const suppressSuggestions = useRef(false);
 
   const loadHistory = useCallback(async () => {
     const response = await fetch("/api/property-research", { signal: AbortSignal.timeout(10_000) });
@@ -80,26 +77,6 @@ export default function ParcelScoutPage() {
   }, []);
 
   useEffect(() => { loadHistory().catch((reason) => setError(scoutMessage(reason, "Unable to open recent lookups. You can still start a new lookup."))); }, [loadHistory]);
-
-  useEffect(() => {
-    if (queryType !== "address" || queryText.trim().length < 4 || suppressSuggestions.current) { suppressSuggestions.current = false; setSuggestions([]); return; }
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      try {
-        const response = await fetch("/api/address-autocomplete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: queryText, sessionToken: sessionToken.current }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]) });
-        const data = await response.json() as { suggestions?: AddressSuggestion[] };
-        setSuggestions(response.ok ? data.suggestions ?? [] : []);
-      } catch { if (!controller.signal.aborted) setSuggestions([]); }
-    }, 350);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [queryText, queryType]);
-
-  function chooseAddress(suggestion: AddressSuggestion) {
-    // Parcel Scout only needs the displayed address; no second provider call is needed.
-    suppressSuggestions.current = true;
-    setQueryText(suggestion.text); setSuggestions([]); setError("");
-    sessionToken.current = crypto.randomUUID();
-  }
 
   async function investigate(event?: FormEvent<HTMLFormElement>, options?: { force?: boolean; depth?: Depth; target?: Research }) {
     event?.preventDefault();
@@ -132,7 +109,7 @@ export default function ParcelScoutPage() {
       const data = await response.json() as { research?: Research; error?: string };
       if (!response.ok || !data.research) throw new Error(data.error || "Unable to open this saved lookup.");
       const research = data.research;
-      setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); window.scrollTo({ top: 0, behavior: "smooth" });
+      setCurrent(research); setQueryType(research.query_type); setQueryText(research.query_text); setCounty(research.county); setState(research.state); setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (reason) {
       setError(scoutMessage(reason, "Unable to open this saved lookup."));
     } finally {
@@ -216,8 +193,10 @@ export default function ParcelScoutPage() {
     <section className="scout-shell">
       <div className="scout-heading"><p className="kicker">Public-record property research</p><h1>Parcel Scout</h1><p>Start with a quick address or APN lookup. Use Deep ownership or Deep pricing from a saved report when you need more sources.</p></div>
       <form className="scout-form" onSubmit={(event) => investigate(event)} aria-busy={Boolean(busy)}>
-        <div className="scout-type" role="group" aria-label="Lookup type"><button type="button" className={queryType === "address" ? "active" : ""} onClick={() => { setQueryType("address"); setSuggestions([]); sessionToken.current = crypto.randomUUID(); }}>Address</button><button type="button" className={queryType === "apn" ? "active" : ""} onClick={() => { setQueryType("apn"); setSuggestions([]); }}>APN</button></div>
-        <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<div className="scout-address-field"><input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder={queryType === "apn" ? "Enter the complete APN" : "Street address, city, state ZIP"} required />{queryType === "address" && suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
+        <div className="scout-type" role="group" aria-label="Lookup type"><button type="button" className={queryType === "address" ? "active" : ""} onClick={() => setQueryType("address")}>Address</button><button type="button" className={queryType === "apn" ? "active" : ""} onClick={() => setQueryType("apn")}>APN</button></div>
+        {queryType === "address"
+          ? <AddressAutocomplete className="scout-query scout-address" fieldClassName="address-input" label="Property address" value={queryText} placeholder="Street address, city, state ZIP" required onChange={(value) => { setQueryText(value); setError(""); }} onSelect={(suggestion) => { setQueryText(suggestion.text.trim().replace(/,\s*USA$/i, "")); setError(""); }} />
+          : <label className="scout-query">Assessor parcel number<input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder="Enter the complete APN" required /></label>}
         {queryType === "apn" && <><label>County<input value={county} onChange={(event) => setCounty(event.target.value)} placeholder="Benton" required /></label><label>State<input value={state} onChange={(event) => setState(event.target.value.toUpperCase())} placeholder="AR" maxLength={2} required /></label></>}
         <button className="scout-submit" type="submit" disabled={processing}>{busy === "quick" ? "Looking up…" : "Scout property"}</button>
         <small>Unstarred reports are cached for 90 days. AI research: {usage.requests} of {usage.limit} this month. RentCast: {rentCastUsage.requests} of {rentCastUsage.limit} monthly requests across Pauli HQ.</small>

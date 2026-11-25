@@ -2,6 +2,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import { cleanupPhotoDrop, handlePhotoDrop, photoDropAllowed, type PhotoDropEnv } from "./photo-drop";
 import { fetchListingResource, listingImageUrl, listingPageUrl, listingThumbnail, missingPhoto, readListingBytes } from "./listing-images";
+import { fetchGooglePlaces, placesSessionToken } from "./places";
 import { propertyViewLoginPath } from "../app/properties/view";
 import { activePropertyCandidates, nextPropertyRefresh, normalizePropertyFilters, northwestArkansasFilters, propertyAvailabilitySql, propertyFeedParams, propertyFrequency, propertyRefreshLeaseMs, type PropertyFilters } from "./property-refresh";
 import { missingScoutModel, sameScoutAddress, sameScoutParcel, scoutDeadlines, scoutProviderJson, ScoutLookupError, sourceKey, type ScoutDepth } from "./parcel-scout-runtime";
@@ -414,26 +415,37 @@ async function geocodeAddress(address: string, env: Env) {
 }
 
 async function addressAutocomplete(request: Request, env: Env) {
-  if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google address autocomplete is not connected yet." }, 503);
-  const body = await request.json<{ input?: string; sessionToken?: string }>();
-  const input = String(body.input ?? "").trim().slice(0, 180);
-  if (input.length < 3) return json({ suggestions: [] });
-  const response = await fetch("https://places.googleapis.com/v1/places:autocomplete", { method: "POST", headers: { "content-type": "application/json", "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text" }, body: JSON.stringify({ input, includedRegionCodes: ["us"], sessionToken: String(body.sessionToken ?? "").slice(0, 80) || undefined }) });
-  const payload = await response.json() as { suggestions?: Array<{ placePrediction?: { placeId?: string; text?: { text?: string } } }>; error?: { message?: string } };
-  if (!response.ok) return json({ error: "Address suggestions are temporarily unavailable." }, 502);
-  return json({ suggestions: (payload.suggestions ?? []).flatMap((item) => item.placePrediction?.placeId && item.placePrediction.text?.text ? [{ placeId: item.placePrediction.placeId, text: item.placePrediction.text.text }] : []) });
+  const body = await request.json<{ input?: string; sessionToken?: string }>().catch(() => null);
+  if (!body || typeof body.input !== "string") return json({ error: "Enter a street address." }, 400);
+  const input = body.input.trim().slice(0, 180);
+  if (input.length < 4) return json({ suggestions: [] });
+  const result = await fetchGooglePlaces<{ suggestions?: Array<{ placePrediction?: { placeId?: string; text?: { text?: string } } }> }>(
+    env.GOOGLE_MAPS_API_KEY, "places:autocomplete", "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text",
+    { input, includedRegionCodes: ["us"], sessionToken: placesSessionToken(body.sessionToken) },
+  );
+  if (!result.ok) return json({ error: result.error, code: result.code }, result.status);
+  const suggestions = result.data.suggestions ?? [];
+  if (!Array.isArray(suggestions)) return json({ error: "Google sent an unreadable response.", code: "unavailable" }, 502);
+  return json({ suggestions: suggestions.slice(0, 5).flatMap((item) => {
+    const placeId = item?.placePrediction?.placeId;
+    const text = item?.placePrediction?.text?.text;
+    return typeof placeId === "string" && placeId && typeof text === "string" && text.trim() ? [{ placeId, text }] : [];
+  }) });
 }
 
 async function addressDetails(request: Request, env: Env) {
-  if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google address autocomplete is not connected yet." }, 503);
-  const body = await request.json<{ placeId?: string; sessionToken?: string }>();
-  const placeId = String(body.placeId ?? "").trim();
+  const body = await request.json<{ placeId?: string; sessionToken?: string }>().catch(() => null);
+  const placeId = typeof body?.placeId === "string" ? body.placeId.trim().slice(0, 300) : "";
   if (!placeId) return json({ error: "Choose an address." }, 400);
   const query = new URLSearchParams();
-  if (body.sessionToken) query.set("sessionToken", String(body.sessionToken).slice(0, 80));
-  const response = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?${query}`, { headers: { "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "formattedAddress,location" } });
-  const payload = await response.json() as { formattedAddress?: string; location?: { latitude?: number; longitude?: number } };
-  if (!response.ok || !payload.formattedAddress) return json({ error: "Unable to load that address." }, 502);
+  const token = placesSessionToken(body?.sessionToken);
+  if (token) query.set("sessionToken", token);
+  const result = await fetchGooglePlaces<{ formattedAddress?: string; location?: { latitude?: number; longitude?: number } }>(
+    env.GOOGLE_MAPS_API_KEY, `places/${encodeURIComponent(placeId)}${token ? `?${query}` : ""}`, "formattedAddress,location",
+  );
+  if (!result.ok) return json({ error: result.error, code: result.code }, result.status);
+  const payload = result.data;
+  if (typeof payload.formattedAddress !== "string" || !payload.formattedAddress.trim()) return json({ error: "Unable to load that address." }, 502);
   return json({ address: payload.formattedAddress.replace(/, USA$/, ""), latitude: payload.location?.latitude, longitude: payload.location?.longitude });
 }
 
@@ -2014,8 +2026,8 @@ const worker = {
         const username = await authenticated(request, env);
         if (!username) return json({ error: "Please log in again." }, 401);
         if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-        if (url.pathname === "/api/address-autocomplete") return addressAutocomplete(request, env);
-        if (url.pathname === "/api/address-details") return addressDetails(request, env);
+        if (url.pathname === "/api/address-autocomplete") return await addressAutocomplete(request, env);
+        if (url.pathname === "/api/address-details") return await addressDetails(request, env);
         return portfolioValuation(request, env);
       }
       if (url.pathname === "/api/property-searches" || url.pathname === "/api/properties" || url.pathname === "/api/properties/query" || url.pathname === "/api/properties/sync" || url.pathname === "/api/properties/rank" || url.pathname === "/api/property-photo" || url.pathname === "/api/property-image" || url.pathname === "/api/property-favorites") {

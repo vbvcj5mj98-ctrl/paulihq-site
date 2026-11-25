@@ -317,16 +317,17 @@ a { color: inherit; text-decoration: none; }
 .portfolio-form-title { display: flex; justify-content: space-between; align-items: center; }
 .portfolio-form-title h2 { margin: 0; font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
 .portfolio-form-title button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.portfolio-form > label { display: grid; gap: 7px; color: #686a63; font-size: .72rem; }
+.portfolio-form > label, .portfolio-address-field { display: grid; gap: 7px; color: #686a63; font-size: .72rem; }
 .portfolio-apn-fields { display: grid; grid-template-columns: 2fr 1.25fr .6fr; gap: 16px; }
 .portfolio-apn-fields label { display: grid; gap: 7px; color: #686a63; font-size: .72rem; }
 .portfolio-apn-fields > small { grid-column: 1 / -1; margin-top: -8px; color: #777970; font-size: .67rem; }
 .portfolio-form input, .portfolio-form select, .portfolio-form textarea { width: 100%; min-height: 48px; padding: 0 13px; border: 1px solid #aaa89f; background: #f7f5ef; color: inherit; font: inherit; }
-.portfolio-address-field > div { position: relative; }
-.portfolio-address-field > div > span { position: absolute; right: 12px; top: 17px; color: #777970; font-size: .68rem; }
+.address-input { position: relative; min-width: 0; }
+.address-suggestion-status { color: #5d6058; font-size: .8rem; line-height: 1.45; }
 .address-suggestions { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; padding: 5px; display: grid; border: 1px solid #aaa89f; background: #fff; box-shadow: 0 14px 35px rgba(32,29,24,.16); }
-.address-suggestions button { min-height: 43px; padding: 9px 11px; border: 0; border-bottom: 1px solid #ece8df; background: transparent; color: #2d302c; font: inherit; font-size: .78rem; text-align: left; cursor: pointer; }
-.address-suggestions button:hover, .address-suggestions button:focus-visible { background: #f0ede5; outline: none; }
+.address-suggestions [role="listbox"] { display: grid; }
+.address-suggestions button { min-height: 44px; padding: 9px 11px; border: 0; border-bottom: 1px solid #ece8df; background: transparent; color: #2d302c; font: inherit; font-size: .875rem; text-align: left; cursor: pointer; }
+.address-suggestions button:hover, .address-suggestions button:focus-visible, .address-suggestions button[aria-selected="true"] { background: #f0ede5; outline: none; }
 .address-suggestions img { width: 110px; height: auto; margin: 7px 8px 4px auto; }
 .valuation-field { display: grid; grid-template-columns: 1fr auto; }
 .valuation-field button { padding: 0 13px; border: 1px solid #1b2929; border-left: 0; background: #1b2929; color: white; font: inherit; font-size: .72rem; cursor: pointer; }
@@ -384,12 +385,10 @@ a { color: inherit; text-decoration: none; }
 .scout-type { grid-column: 1 / -1; display: flex; gap: 5px; }
 .scout-type button { min-height: 39px; padding: 0 16px; border: 1px solid #aaa89f; background: transparent; color: #6a6c64; font: inherit; font-size: .72rem; cursor: pointer; }
 .scout-type button.active { border-color: #1b2929; background: #1b2929; color: white; }
-.scout-form label { display: grid; gap: 7px; color: #686a63; font-size: .7rem; }
+.scout-form label, .scout-query { display: grid; gap: 7px; color: #686a63; font-size: .7rem; }
 .scout-form input { width: 100%; min-width: 0; height: 50px; padding: 0 13px; border: 1px solid #aaa89f; background: #f7f5ef; color: #1b2929; font: inherit; outline: none; }
 .scout-form input:focus { border-color: #1b2929; box-shadow: 0 0 0 3px rgba(27,41,41,.07); }
-.scout-address-field { position: relative; }
-.scout-address-field > span { position: absolute; top: 18px; right: 12px; color: #777970; font-size: .66rem; }
-.scout-address-field .address-suggestions { top: calc(100% + 4px); }
+.scout-address { grid-column: 1 / -2; }
 .scout-submit { min-height: 50px; align-self: end; padding: 0 22px; border: 0; background: #8d704f; color: white; font: inherit; cursor: pointer; }
 .scout-submit:disabled { opacity: .55; cursor: wait; }
 .scout-form > small { grid-column: 1 / -1; color: #777970; font-size: .65rem; line-height: 1.45; }
