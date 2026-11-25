@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useState } from "react";
+import { propertyViewAfterLogin } from "../properties/view";
 
 export default function LoginPage() {
   const [error, setError] = useState("");
@@ -19,7 +20,7 @@ export default function LoginPage() {
     });
     setBusy(false);
     if (response.ok) {
-      window.location.assign("/portal");
+      window.location.assign(propertyViewAfterLogin(window.location.search));
       return;
     }
     const result = (await response.json().catch(() => ({}))) as { error?: string };

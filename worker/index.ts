@@ -1,6 +1,8 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { cleanupPhotoDrop, handlePhotoDrop, photoDropAllowed, type PhotoDropEnv } from "./photo-drop";
+import { fetchListingResource, listingImageUrl, listingPageUrl, listingThumbnail, missingPhoto, readListingBytes } from "./listing-images";
+import { propertyViewLoginPath } from "../app/properties/view";
 import { activePropertyCandidates, nextPropertyRefresh, normalizePropertyFilters, northwestArkansasFilters, propertyAvailabilitySql, propertyFeedParams, propertyFrequency, propertyRefreshLeaseMs, type PropertyFilters } from "./property-refresh";
 import { missingScoutModel, sameScoutAddress, sameScoutParcel, scoutDeadlines, scoutProviderJson, ScoutLookupError, sourceKey, type ScoutDepth } from "./parcel-scout-runtime";
 
@@ -370,7 +372,7 @@ async function propertyListings(request: Request, env: Env, username: string) {
     ai: "COALESCE(r.score, 0) DESC, l.last_seen_at DESC",
   };
   const sort = requestedSort === "roi" && mode !== "income" ? "ai" : Object.hasOwn(sortClauses, requestedSort) ? requestedSort : mode === "income" ? "roi" : "ai";
-  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, r.estimated_monthly_income, r.estimated_roi, c.latitude, c.longitude, m.image_url, m.source_page_url, CASE WHEN f.username IS NULL THEN 0 ELSE 1 END AS is_favorite, ${propertyAvailabilitySql} AS availability
+  const result = await env.DB.prepare(`SELECT l.source_id, l.search_id, l.address, l.city, l.state, l.zip_code, l.property_type, l.price, l.bedrooms, l.bathrooms, l.square_feet, l.lot_size, l.days_on_market, l.status, l.listed_at, l.source_url, l.last_seen_at, s.label AS search_label, r.score AS ai_score, r.summary AS ai_summary, r.estimated_monthly_income, r.estimated_roi, c.latitude, c.longitude, m.image_url, m.source_page_url, m.found_at AS image_checked_at, CASE WHEN f.username IS NULL THEN 0 ELSE 1 END AS is_favorite, ${propertyAvailabilitySql} AS availability
     FROM property_listings l JOIN property_searches s ON s.id = l.search_id LEFT JOIN property_ai_rankings r ON r.source_id = l.source_id AND r.search_id = l.search_id LEFT JOIN property_coordinates c ON c.source_id = l.source_id AND c.search_id = l.search_id LEFT JOIN property_media m ON m.source_id = l.source_id AND m.search_id = l.search_id LEFT JOIN property_favorites f ON f.username = ? AND f.source_id = l.source_id AND f.search_id = l.search_id
     WHERE (s.owner = ? OR s.owner = 'shared') AND l.mode = ? AND (? IS NULL OR l.search_id = ?) AND ${starredOnly ? "f.username IS NOT NULL" : `(${propertyAvailabilitySql}) = 'active'`} AND (l.mode != 'income' OR COALESCE(json_extract(CASE WHEN json_valid(l.raw_json) THEN l.raw_json ELSE '{}' END, '$.hoa.fee'), 0) <= 0)
       AND (l.property_type IS NULL OR (lower(l.property_type) NOT LIKE '%mobile%' AND lower(l.property_type) NOT LIKE '%manufactured%'))
@@ -1441,35 +1443,29 @@ async function aiPropertyQuery(request: Request, env: Env, username: string, ran
   return json({ ok: true, searchId, count: listings.length, label, filters });
 }
 
-const approvedListingHosts = ["zillow.com", "redfin.com", "realtor.com", "homes.com", "trulia.com", "compass.com", "coldwellbankerhomes.com", "kw.com", "loopnet.com", "crexi.com"];
-
-function approvedListingUrl(value: string) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && approvedListingHosts.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`)) ? url : null;
-  } catch { return null; }
-}
-
-function absoluteHttpsUrl(value: string, base: URL) {
-  try {
-    const url = new URL(value, base);
-    return url.protocol === "https:" ? url.toString() : null;
-  } catch { return null; }
-}
-
 async function findPropertyPhoto(request: Request, env: Env, username: string) {
   if (!env.OPENAI_API_KEY) return json({ error: "The AI connection is not configured." }, 503);
-  const body = await request.json<{ sourceId?: string; searchId?: number }>();
+  const body = await request.json<{ sourceId?: string; searchId?: number; replace?: boolean }>();
   const sourceId = String(body.sourceId ?? "").slice(0, 300);
   const searchId = Number(body.searchId);
   const listing = await env.DB.prepare(`SELECT l.address, s.owner FROM property_listings l JOIN property_searches s ON s.id = l.search_id
     WHERE l.source_id = ? AND l.search_id = ? AND (s.owner = ? OR s.owner = 'shared')`).bind(sourceId, searchId, username).first<{ address: string; owner: string }>();
   if (!listing) return json({ error: "Property not found." }, 404);
   const cached = await env.DB.prepare("SELECT image_url, source_page_url FROM property_media WHERE source_id = ? AND search_id = ?").bind(sourceId, searchId).first<{ image_url: string; source_page_url: string }>();
-  if (cached) return json(cached);
+  if (cached?.image_url && body.replace !== true) return json(cached);
+
+  const savePreview = async (page: URL, image?: URL | null) => {
+    const foundAt = Date.now();
+    const imageUrl = image?.href ?? "";
+    await env.DB.prepare(`INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(source_id, search_id) DO UPDATE SET image_url = excluded.image_url, source_page_url = excluded.source_page_url, found_at = excluded.found_at`)
+      .bind(sourceId, searchId, imageUrl, page.href, foundAt).run();
+    return json({ image_url: imageUrl, source_page_url: page.href });
+  };
 
   const aiResponse = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
+    signal: AbortSignal.timeout(18000),
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: env.OPENAI_MODEL || "gpt-5.4-mini",
@@ -1481,32 +1477,31 @@ async function findPropertyPhoto(request: Request, env: Env, username: string) {
   const aiPayload = await aiResponse.json() as { error?: { code?: string; type?: string; message?: string }; output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
   if (!aiResponse.ok) return json({ error: safeOpenAIError(aiResponse.status, aiPayload) }, 502);
   let sourcePage: URL | null = null;
-  let discoveredImage: string | null = null;
+  let discoveredImage: URL | null = null;
   try {
     const parsed = JSON.parse(responseText(aiPayload).replace(/^```json\s*/i, "").replace(/```\s*$/, "")) as { source_page_url?: string; image_url?: string };
-    sourcePage = approvedListingUrl(String(parsed.source_page_url ?? ""));
-    if (sourcePage && parsed.image_url) discoveredImage = absoluteHttpsUrl(String(parsed.image_url), sourcePage);
+    sourcePage = listingPageUrl(String(parsed.source_page_url ?? ""));
+    if (sourcePage && parsed.image_url) discoveredImage = listingImageUrl(String(parsed.image_url), sourcePage);
   } catch { sourcePage = null; }
   if (!sourcePage) return json({ error: "No approved listing page was found for this address." }, 404);
 
-  if (discoveredImage) {
-    await env.DB.prepare("INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(sourceId, searchId, discoveredImage, sourcePage.toString(), Date.now()).run();
-    return json({ image_url: discoveredImage, source_page_url: sourcePage.toString() });
-  }
+  if (discoveredImage) return savePreview(sourcePage, discoveredImage);
 
-  const pageResponse = await fetch(sourcePage.toString(), { headers: { "user-agent": "Mozilla/5.0 (compatible; PauliHQ/1.0; private property research)" }, redirect: "follow" });
-  if (!pageResponse.ok) return json({ error: "The listing website blocked its preview image." }, 502);
-  const finalPage = approvedListingUrl(pageResponse.url);
-  if (!finalPage) return json({ error: "The listing redirected to an unsupported website." }, 502);
-  const html = (await pageResponse.text()).slice(0, 1_500_000);
-  const match = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["']/i)
-    ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:image["']/i);
-  const imageUrl = match ? absoluteHttpsUrl(match[1].replaceAll("&amp;", "&"), finalPage) : null;
-  if (!imageUrl) return json({ error: "That listing page does not expose a usable preview image." }, 404);
-  await env.DB.prepare("INSERT INTO property_media (source_id, search_id, image_url, source_page_url, found_at) VALUES (?, ?, ?, ?, ?)")
-    .bind(sourceId, searchId, imageUrl, finalPage.toString(), Date.now()).run();
-  return json({ image_url: imageUrl, source_page_url: finalPage.toString() });
+  let finalPage = sourcePage;
+  let imageUrl: URL | null = null;
+  try {
+    const preview = await fetchListingResource(sourcePage, listingPageUrl, AbortSignal.timeout(4500), "text/html");
+    if (preview?.response.ok && preview.response.headers.get("content-type")?.toLowerCase().startsWith("text/html")) {
+      finalPage = preview.url;
+      const bytes = await readListingBytes(preview.response, 1_500_000);
+      const html = bytes ? new TextDecoder().decode(bytes) : "";
+      const match = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+        ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:image["']/i);
+      if (match) imageUrl = listingImageUrl(match[1].replaceAll("&amp;", "&"), finalPage);
+    } else { void preview?.response.body?.cancel().catch(() => undefined); }
+  } catch { /* A listing link is useful even when its preview cannot be fetched. */ }
+  if (cached?.image_url && !imageUrl) return json({ image_url: "", source_page_url: finalPage.href });
+  return savePreview(finalPage, imageUrl);
 }
 
 async function propertyImage(request: Request, env: Env, username: string) {
@@ -1516,21 +1511,7 @@ async function propertyImage(request: Request, env: Env, username: string) {
   const media = await env.DB.prepare(`SELECT m.image_url, m.source_page_url FROM property_media m
     JOIN property_searches s ON s.id = m.search_id WHERE m.source_id = ? AND m.search_id = ? AND (s.owner = ? OR s.owner = 'shared')`)
     .bind(sourceId, searchId, username).first<{ image_url: string; source_page_url: string }>();
-  if (!media) return new Response("Image not found", { status: 404 });
-  let imageUrl: URL;
-  try {
-    imageUrl = new URL(media.image_url);
-    if (imageUrl.protocol !== "https:" || imageUrl.hostname === "localhost" || /^\d+\.\d+\.\d+\.\d+$/.test(imageUrl.hostname)) throw new Error("Unsupported image host");
-  } catch { return new Response("Unsupported image", { status: 400 }); }
-  const requestHeaders = { referer: media.source_page_url, accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36" };
-  let upstream = await fetch(imageUrl.toString(), { headers: requestHeaders, redirect: "follow" });
-  let contentType = upstream.headers.get("content-type") ?? "";
-  if (!upstream.ok || !contentType.startsWith("image/")) {
-    upstream = await fetch(imageUrl.toString(), { headers: { accept: requestHeaders.accept, "user-agent": requestHeaders["user-agent"] }, redirect: "follow" });
-    contentType = upstream.headers.get("content-type") ?? "";
-  }
-  if (!upstream.ok || !contentType.startsWith("image/")) return new Response("Image unavailable", { status: 502 });
-  return new Response(upstream.body, { headers: { "content-type": contentType, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
+  return media ? listingThumbnail(media.image_url, media.source_page_url) : missingPhoto();
 }
 
 async function reserveRentCastRequest(db: D1Database) {
@@ -2042,8 +2023,8 @@ const worker = {
         if (!username) return json({ error: "Please log in again." }, 401);
         if (!(await pageAccess(env, username, "properties"))) return json({ error: "You do not have access to Property Finder." }, 403);
         if (url.pathname === "/api/property-searches") return propertySearches(request, env, username);
-        if (url.pathname === "/api/property-photo" && request.method === "POST") return findPropertyPhoto(request, env, username);
-        if (url.pathname === "/api/property-image" && request.method === "GET") return propertyImage(request, env, username);
+        if (url.pathname === "/api/property-photo" && request.method === "POST") return await findPropertyPhoto(request, env, username);
+        if (url.pathname === "/api/property-image" && request.method === "GET") return await propertyImage(request, env, username);
         if (url.pathname === "/api/property-favorites") return propertyFavorite(request, env, username);
         if (url.pathname === "/api/properties/query" && request.method === "POST") return await aiPropertyQuery(request, env, username, (job) => ctx.waitUntil(job));
         if (url.pathname === "/api/properties/rank") return rankPropertySearch(request, env, username);
@@ -2102,7 +2083,7 @@ const worker = {
       }
       if (url.pathname.startsWith("/assistant") || url.pathname.startsWith("/properties") || url.pathname.startsWith("/parcel-scout") || url.pathname.startsWith("/lists")) {
         const username = await authenticated(request, env);
-        if (!username) return Response.redirect(new URL("/login", request.url), 302);
+        if (!username) return Response.redirect(new URL(url.pathname === "/properties" && url.search ? propertyViewLoginPath(url.search) : "/login", request.url), 302);
         const page: PageKey = url.pathname.startsWith("/assistant") ? "assistant" : url.pathname.startsWith("/properties") || url.pathname.startsWith("/parcel-scout") ? "properties" : "lists";
         if (!(await pageAccess(env, username, page))) return Response.redirect(new URL("/portal", request.url), 302);
       }

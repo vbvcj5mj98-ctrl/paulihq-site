@@ -22,3 +22,14 @@ test("the private Photo Drop page does not render for visitors without a session
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), `${origin}/login`);
 });
+
+test("a Property Finder bookmark points to the selected view after sign-in", async () => {
+  const view = "/properties?mode=primary&sort=lot&search=all&starred=1";
+  const response = await worker.fetch(new Request(`${origin}${view}&prompt=discard-this`), env, ctx);
+  assert.equal(response.status, 302);
+  const login = new URL(response.headers.get("location"));
+  assert.equal(login.origin, origin);
+  assert.equal(login.pathname, "/login");
+  assert.equal(login.searchParams.get("propertyView"), view);
+  assert.equal(login.searchParams.size, 1);
+});
