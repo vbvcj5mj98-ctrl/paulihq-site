@@ -27,13 +27,18 @@ async function fixture(t, responses) {
         bind: (...args) => withValues(args),
         first: async () => db.prepare(query).get(...values) ?? null,
         all: async () => ({ results: db.prepare(query).all(...values) }),
-        run: () => { const result = db.prepare(query).run(...values); return { meta: { changes: result.changes, last_row_id: result.lastInsertRowid } }; },
+        run: async () => { const result = db.prepare(query).run(...values); return { meta: { changes: result.changes, last_row_id: result.lastInsertRowid } }; },
       });
       return withValues([]);
     },
     async batch(statements) {
       db.exec("BEGIN");
-      try { const result = statements.map((statement) => statement.run()); db.exec("COMMIT"); return result; }
+      try {
+        const result = [];
+        for (const statement of statements) result.push(await statement.run());
+        db.exec("COMMIT");
+        return result;
+      }
       catch (error) { db.exec("ROLLBACK"); throw error; }
     },
   };
@@ -48,7 +53,9 @@ async function fixture(t, responses) {
   t.mock.method(globalThis, "fetch", async (url) => {
     calls.push(new URL(url));
     assert.ok(responses.length, "Unexpected provider call");
-    return responses.shift();
+    const response = responses.shift();
+    if (response instanceof Error) throw response;
+    return response;
   });
   const request = (route, body, username = "carsonpauli") => worker.fetch(new Request(`https://property.test${route}`, {
     method: body ? "POST" : "GET", headers: { cookie: `paulihq_session=${sessions.get(username)}`, "content-type": "application/json" },
@@ -77,6 +84,8 @@ test("manual refresh is owner-only, replaces the live snapshot, preserves stars 
   assert.equal(scanned.status, 200);
   assert.equal((await scanned.json()).count, 1);
   assert.equal(calls[0].searchParams.get("status"), "Active");
+  assert.equal(calls[0].searchParams.get("limit"), "100");
+  assert.equal(calls[0].searchParams.has("offset"), false);
   const live = await (await request(all)).json();
   assert.equal(live.usage.requests, 50);
   assert.deepEqual(live.listings.map((item) => item.source_id), ["New"]);
@@ -84,6 +93,22 @@ test("manual refresh is owner-only, replaces the live snapshot, preserves stars 
   assert.equal(starred.listings[0].availability, "not_in_latest");
   assert.equal((await request(sync, { searchId: -100 })).status, 429);
   assert.equal(calls.length, 1);
+});
+
+test("a timed-out shared refresh uses only one smaller request and keeps the last verified results", async (t) => {
+  const errors = [];
+  t.mock.method(console, "error", (...args) => errors.push(args));
+  const { db, request, calls } = await fixture(t, [Response.json([rentcastListing("Verified")]), new DOMException("The operation was aborted due to timeout", "TimeoutError")]);
+  assert.equal((await request(sync, { searchId: -100 })).status, 200);
+  const before = db.prepare("SELECT last_synced_at FROM property_searches WHERE id = -100").get().last_synced_at;
+  assert.equal((await request(sync, { searchId: -100 })).status, 502);
+  assert.equal(errors[0]?.[2]?.name, "TimeoutError");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].searchParams.get("limit"), "100");
+  const live = await (await request(all)).json();
+  assert.equal(live.usage.requests, 2);
+  assert.deepEqual(live.listings.map((item) => item.source_id), ["Verified"]);
+  assert.equal(db.prepare("SELECT last_synced_at FROM property_searches WHERE id = -100").get().last_synced_at, before);
 });
 
 test("scheduled scan waits for the weekly cadence and treats a successful empty feed as current", async (t) => {

@@ -1712,7 +1712,8 @@ async function syncPropertyListings(env: Env, options: { searchId?: number; user
     try {
       const fallback = { city: search.city, state: search.state, zipCode: search.zip_code, minPrice: search.min_price, maxPrice: search.max_price };
       const filters = search.id === -100 ? northwestArkansasFilters : normalizePropertyFilters(search.source_filters ? JSON.parse(search.source_filters) : fallback);
-      const limit = search.id === -100 ? 500 : 100;
+      // Keep each saved search to one small page, including the shared radius search.
+      const limit = 100;
       const response = await rentCastFetch(env, `https://api.rentcast.io/v1/listings/sale?${propertyFeedParams(filters, limit)}`, AbortSignal.timeout(30_000));
       if (!response) {
         await finish("quota_reached").run();
