@@ -18,6 +18,8 @@ type ResearchResult = {
 };
 
 type Research = { id: number; query_type: "address" | "apn"; query_text: string; county: string; state: string; starred: number | boolean; refreshed_at: number; result: ResearchResult };
+type ResearchSummary = Omit<Research, "result"> & { address?: string | null };
+type Depth = "quick" | "ownership" | "valuation";
 type Usage = { requests: number; limit: number; period: string };
 type AddressSuggestion = { placeId: string; text: string };
 type OwnershipEvidence = { source_kind?: string; name?: string | null; record_date?: string | null; title?: string; url?: string; supports?: string };
@@ -42,43 +44,49 @@ function DetailGrid({ values }: { values: Array<[string, unknown, ("money" | "nu
   return <dl className="scout-details">{values.map(([label, value, kind]) => <div className={present(value) ? "" : "missing"} key={label}><dt>{label}</dt><dd>{display(value, kind)}</dd></div>)}</dl>;
 }
 
+function scoutMessage(reason: unknown, fallback: string) {
+  if (reason instanceof Error && (reason.name === "TimeoutError" || reason.name === "AbortError")) return "That lookup timed out. Try again or open the county record search.";
+  return reason instanceof Error && reason.name === "Error" ? reason.message : fallback;
+}
+
 export default function ParcelScoutPage() {
   const [queryType, setQueryType] = useState<"address" | "apn">("address");
   const [queryText, setQueryText] = useState("");
   const [county, setCounty] = useState("");
   const [state, setState] = useState("");
-  const [researches, setResearches] = useState<Research[]>([]);
+  const [researches, setResearches] = useState<ResearchSummary[]>([]);
   const [current, setCurrent] = useState<Research | null>(null);
   const [usage, setUsage] = useState<Usage>({ requests: 0, limit: 20, period: "" });
   const [rentCastUsage, setRentCastUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [ownerEvidenceUsage, setOwnerEvidenceUsage] = useState<Usage>({ requests: 0, limit: 50, period: "" });
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
-  const [addressBusy, setAddressBusy] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<Depth | null>(null);
+  const [opening, setOpening] = useState<number | null>(null);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
   const [evidenceText, setEvidenceText] = useState("");
   const [evidenceImage, setEvidenceImage] = useState("");
   const [evidenceFileName, setEvidenceFileName] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const sessionToken = useRef(crypto.randomUUID());
   const suppressSuggestions = useRef(false);
 
   const loadHistory = useCallback(async () => {
-    const response = await fetch("/api/property-research");
+    const response = await fetch("/api/property-research", { signal: AbortSignal.timeout(10_000) });
     if (response.status === 401) return window.location.assign("/login");
-    const data = await response.json() as { researches?: Research[]; usage?: Usage; rentCastUsage?: Usage; ownerEvidenceUsage?: Usage; error?: string };
+    const data = await response.json() as { researches?: ResearchSummary[]; usage?: Usage; rentCastUsage?: Usage; ownerEvidenceUsage?: Usage; error?: string };
     if (!response.ok) throw new Error(data.error || "Unable to load Parcel Scout.");
     setResearches(data.researches ?? []); if (data.usage) setUsage(data.usage); if (data.rentCastUsage) setRentCastUsage(data.rentCastUsage); if (data.ownerEvidenceUsage) setOwnerEvidenceUsage(data.ownerEvidenceUsage);
   }, []);
 
-  useEffect(() => { loadHistory().catch((reason: Error) => setError(reason.message)); }, [loadHistory]);
+  useEffect(() => { loadHistory().catch((reason) => setError(scoutMessage(reason, "Unable to open recent lookups. You can still start a new lookup."))); }, [loadHistory]);
 
   useEffect(() => {
     if (queryType !== "address" || queryText.trim().length < 4 || suppressSuggestions.current) { suppressSuggestions.current = false; setSuggestions([]); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch("/api/address-autocomplete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: queryText, sessionToken: sessionToken.current }), signal: controller.signal });
+        const response = await fetch("/api/address-autocomplete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: queryText, sessionToken: sessionToken.current }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]) });
         const data = await response.json() as { suggestions?: AddressSuggestion[] };
         setSuggestions(response.ok ? data.suggestions ?? [] : []);
       } catch { if (!controller.signal.aborted) setSuggestions([]); }
@@ -86,29 +94,50 @@ export default function ParcelScoutPage() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [queryText, queryType]);
 
-  async function chooseAddress(suggestion: AddressSuggestion) {
-    setAddressBusy(true); setSuggestions([]); setError("");
-    const response = await fetch("/api/address-details", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ placeId: suggestion.placeId, sessionToken: sessionToken.current }) });
-    const data = await response.json() as { address?: string; error?: string };
-    if (!response.ok || !data.address) setError(data.error || "Unable to select that address.");
-    else { suppressSuggestions.current = true; setQueryText(data.address); sessionToken.current = crypto.randomUUID(); }
-    setAddressBusy(false);
+  function chooseAddress(suggestion: AddressSuggestion) {
+    // Parcel Scout only needs the displayed address; no second provider call is needed.
+    suppressSuggestions.current = true;
+    setQueryText(suggestion.text); setSuggestions([]); setError("");
+    sessionToken.current = crypto.randomUUID();
   }
 
-  async function investigate(event?: FormEvent<HTMLFormElement>, force = false) {
-    event?.preventDefault(); setBusy(true); setError("");
-    const response = await fetch("/api/property-research", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ queryType, queryText, county, state, force }) });
-    const data = await response.json() as { id?: number; result?: ResearchResult; starred?: boolean; cached?: boolean; refreshedAt?: number; error?: string };
-    if (!response.ok || !data.result || !data.id) setError(data.error || "Parcel Scout could not complete that investigation.");
-    else {
-      const record: Research = { id: data.id, query_type: queryType, query_text: queryText, county, state, starred: Boolean(data.starred), refreshed_at: data.refreshedAt ?? Date.now(), result: data.result };
-      setCurrent(record); await loadHistory();
+  async function investigate(event?: FormEvent<HTMLFormElement>, options?: { force?: boolean; depth?: Depth; target?: Research }) {
+    event?.preventDefault();
+    if (busy || opening || evidenceBusy) return;
+    const depth = options?.depth ?? "quick";
+    const target = options?.target;
+    const criteria = target ? { queryType: target.query_type, queryText: target.query_text, county: target.county, state: target.state } : { queryType, queryText, county: queryType === "apn" ? county : "", state: queryType === "apn" ? state : "" };
+    setBusy(depth); setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/property-research", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...criteria, depth, force: options?.force }), signal: AbortSignal.timeout(30_000) });
+      if (response.status === 401) return window.location.assign("/login");
+      const data = await response.json() as { id?: number; result?: ResearchResult; starred?: boolean; cached?: boolean; refreshedAt?: number; error?: string; notice?: string };
+      if (!response.ok || !data.result || !data.id) throw new Error(data.error || "Parcel Scout could not complete the lookup. Open the county record search to check directly.");
+      const record: Research = { id: data.id, query_type: criteria.queryType, query_text: criteria.queryText, county: criteria.county, state: criteria.state, starred: Boolean(data.starred), refreshed_at: data.refreshedAt ?? Date.now(), result: data.result };
+      setCurrent(record); setNotice(data.notice || (data.cached ? "Showing the saved report." : ""));
+      void loadHistory().catch(() => {});
+    } catch (reason) {
+      setError(scoutMessage(reason, "Unable to reach Parcel Scout. Try again or open the county record search."));
+    } finally {
+      setBusy(null);
     }
-    setBusy(false);
   }
 
-  function openResearch(research: Research) {
-    setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); setError(""); window.scrollTo({ top: 0, behavior: "smooth" });
+  async function openResearch(summary: ResearchSummary) {
+    if (opening || busy || evidenceBusy) return;
+    setOpening(summary.id); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/property-research?id=${summary.id}`, { signal: AbortSignal.timeout(10_000) });
+      if (response.status === 401) return window.location.assign("/login");
+      const data = await response.json() as { research?: Research; error?: string };
+      if (!response.ok || !data.research) throw new Error(data.error || "Unable to open this saved lookup.");
+      const research = data.research;
+      setCurrent(research); setQueryType(research.query_type); suppressSuggestions.current = true; setQueryText(research.query_text); setCounty(research.county); setState(research.state); setSuggestions([]); setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (reason) {
+      setError(scoutMessage(reason, "Unable to open this saved lookup."));
+    } finally {
+      setOpening(null);
+    }
   }
 
   function chooseEvidenceImage(file?: File) {
@@ -124,34 +153,43 @@ export default function ParcelScoutPage() {
   }
 
   async function verifyEvidence() {
-    if (!current) return;
+    if (!current || busy || opening || evidenceBusy) return;
     if (!evidenceText.trim() && !evidenceImage) return setError("Paste the visible ownership result or attach a screenshot.");
     setEvidenceBusy(true); setError("");
     const target = String(current.result.identity?.address || current.query_text);
     const sourceUrl = `https://www.google.com/search?q=${encodeURIComponent(`"${target}" "Ownership History" "Current Owners"`)}`;
-    const response = await fetch("/api/property-owner-evidence", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ researchId: current.id, evidenceText, imageDataUrl: evidenceImage, sourceUrl }) });
-    const data = await response.json() as { id?: number; result?: ResearchResult; starred?: boolean; refreshedAt?: number; error?: string };
-    if (!response.ok || !data.result) setError(data.error || "Unable to verify that ownership evidence.");
-    else {
+    try {
+      const response = await fetch("/api/property-owner-evidence", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ researchId: current.id, evidenceText, imageDataUrl: evidenceImage, sourceUrl }), signal: AbortSignal.timeout(22_000) });
+      if (response.status === 401) return window.location.assign("/login");
+      const data = await response.json() as { id?: number; result?: ResearchResult; starred?: boolean; refreshedAt?: number; error?: string };
+      if (!response.ok || !data.result) throw new Error(data.error || "Unable to verify that ownership evidence.");
       setCurrent({ ...current, result: data.result, starred: Boolean(data.starred), refreshed_at: data.refreshedAt ?? Date.now() });
-      setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); await loadHistory();
+      setEvidenceText(""); setEvidenceImage(""); setEvidenceFileName(""); void loadHistory().catch(() => {});
+    } catch (reason) {
+      setError(scoutMessage(reason, "Unable to verify that ownership evidence."));
+    } finally {
+      setEvidenceBusy(false);
     }
-    setEvidenceBusy(false);
   }
 
   async function toggleStar() {
     if (!current) return;
     const starred = !Boolean(current.starred);
-    const response = await fetch("/api/property-research", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: current.id, starred }) });
-    if (!response.ok) return setError("Unable to update the star.");
-    setCurrent({ ...current, starred }); await loadHistory();
+    try {
+      const response = await fetch("/api/property-research", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: current.id, starred }), signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error("Unable to update the star.");
+      setCurrent((previous) => previous?.id === current.id ? { ...previous, starred } : previous);
+      void loadHistory().catch(() => {});
+    } catch (reason) { setError(scoutMessage(reason, "Unable to update the star.")); }
   }
 
-  async function remove(research: Research) {
-    const response = await fetch("/api/property-research", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: research.id }) });
-    if (!response.ok) return setError("Unable to remove that lookup.");
-    if (current?.id === research.id) setCurrent(null);
-    await loadHistory();
+  async function remove(research: ResearchSummary) {
+    try {
+      const response = await fetch("/api/property-research", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: research.id }), signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error("Unable to remove that lookup.");
+      setCurrent((previous) => previous?.id === research.id ? null : previous);
+      void loadHistory().catch(() => {});
+    } catch (reason) { setError(scoutMessage(reason, "Unable to remove that lookup.")); }
   }
 
   const result = current?.result;
@@ -170,29 +208,32 @@ export default function ParcelScoutPage() {
   const evidenceTarget = String(identity.address || current?.query_text || queryText);
   const ownershipSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(`"${evidenceTarget}" "Ownership History" "Current Owners"`)}`;
   const countySearchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${String(identity.county || current?.county || county)} County ${String(identity.state || current?.state || state)} assessor property search ${evidenceTarget}`)}`;
+  const inputCountySearchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${queryText.trim()} ${county} ${state} county assessor parcel record`)}`;
+  const processing = Boolean(busy || opening || evidenceBusy);
 
   return <main className="properties-page scout-page">
     <header className="properties-header"><HqHomeLink /><HqMenu current="/parcel-scout" /></header>
     <section className="scout-shell">
-      <div className="scout-heading"><p className="kicker">Public-record property research</p><h1>Parcel Scout</h1><p>Enter an address or APN. Parcel Scout checks assessor, tax, GIS, recorder, permit, and exact-property sources. A dedicated deep ownership pass runs automatically when the owner is not firmly confirmed.</p></div>
-      <form className="scout-form" onSubmit={(event) => investigate(event)}>
+      <div className="scout-heading"><p className="kicker">Public-record property research</p><h1>Parcel Scout</h1><p>Start with a quick address or APN lookup. Use Deep ownership or Deep pricing from a saved report when you need more sources.</p></div>
+      <form className="scout-form" onSubmit={(event) => investigate(event)} aria-busy={Boolean(busy)}>
         <div className="scout-type" role="group" aria-label="Lookup type"><button type="button" className={queryType === "address" ? "active" : ""} onClick={() => { setQueryType("address"); setSuggestions([]); sessionToken.current = crypto.randomUUID(); }}>Address</button><button type="button" className={queryType === "apn" ? "active" : ""} onClick={() => { setQueryType("apn"); setSuggestions([]); }}>APN</button></div>
-        <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<div className="scout-address-field"><input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder={queryType === "apn" ? "Enter the complete APN" : "Start typing a property address…"} required />{addressBusy && <span>Selecting…</span>}{queryType === "address" && suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
+        <label className="scout-query">{queryType === "apn" ? "Assessor parcel number" : "Property address"}<div className="scout-address-field"><input value={queryText} autoComplete="off" onChange={(event) => { setQueryText(event.target.value); setError(""); }} placeholder={queryType === "apn" ? "Enter the complete APN" : "Street address, city, state ZIP"} required />{queryType === "address" && suggestions.length > 0 && <div className="address-suggestions" role="listbox">{suggestions.map((suggestion) => <button type="button" role="option" aria-selected="false" key={suggestion.placeId} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseAddress(suggestion)}>{suggestion.text}</button>)}<img src="https://maps.gstatic.com/mapfiles/api-3/images/powered-by-google-on-white3.png" alt="Powered by Google" /></div>}</div></label>
         {queryType === "apn" && <><label>County<input value={county} onChange={(event) => setCounty(event.target.value)} placeholder="Benton" required /></label><label>State<input value={state} onChange={(event) => setState(event.target.value.toUpperCase())} placeholder="AR" maxLength={2} required /></label></>}
-        <button className="scout-submit" type="submit" disabled={busy}>{busy ? "Investigating…" : "Scout property"}</button>
-        <small>New investigations start unstarred. Unstarred reports are cached for 90 days; starred reports stay saved until you unstar them. AI investigations: {usage.requests} of {usage.limit} this month. RentCast requests across all Pauli HQ property features: {rentCastUsage.requests} of {rentCastUsage.limit} this month.</small>
+        <button className="scout-submit" type="submit" disabled={processing}>{busy === "quick" ? "Looking up…" : "Scout property"}</button>
+        <small>Unstarred reports are cached for 90 days. AI research: {usage.requests} of {usage.limit} this month. RentCast: {rentCastUsage.requests} of {rentCastUsage.limit} monthly requests across Pauli HQ.</small>
       </form>
-      {error && <p className="property-error" role="alert">{error}</p>}
+      {notice && <p role="status">{notice}</p>}
+      {error && <p className="property-error" role="alert">{error}{queryText.trim() && <> <a href={inputCountySearchUrl} target="_blank" rel="noreferrer">Open county record search</a></>}</p>}
 
       {current && result && <article className="scout-report">
-        <header className="scout-report-header"><div><small>{current.query_type === "apn" ? `APN ${current.query_text}` : "Property report"}</small><h2>{String(identity.address || current.query_text)}</h2><p>{result.summary || "Source-backed property details found during this investigation."}</p></div><div className="scout-report-actions"><button className={current.starred ? "starred" : ""} onClick={toggleStar} aria-pressed={Boolean(current.starred)}>{current.starred ? "★ Starred" : "☆ Star"}</button><button onClick={() => investigate(undefined, true)} disabled={busy}>Refresh research</button></div></header>
+        <header className="scout-report-header"><div><small>{current.query_type === "apn" ? `APN ${current.query_text}` : "Property report"}</small><h2>{String(identity.address || current.query_text)}</h2><p>{result.summary || "Check details against the linked records."}</p></div><div className="scout-report-actions"><button className={current.starred ? "starred" : ""} onClick={toggleStar} disabled={processing} aria-pressed={Boolean(current.starred)}>{current.starred ? "★ Starred" : "☆ Star"}</button><button onClick={() => investigate(undefined, { force: true, target: current })} disabled={processing}>Refresh lookup</button><button onClick={() => investigate(undefined, { depth: "ownership", target: current })} disabled={processing}>{busy === "ownership" ? "Checking ownership…" : "Deep ownership"}</button><button onClick={() => investigate(undefined, { depth: "valuation", target: current })} disabled={processing}>{busy === "valuation" ? "Checking pricing…" : "Deep pricing"}</button></div></header>
         <div className="scout-report-grid">
           <section className="scout-owner-evidence-panel">
             <div><p className="kicker">When automatic records are unavailable</p><h3>Add visible ownership evidence</h3><p>Open either search, then paste the visible ownership line or attach a screenshot. Parcel Scout verifies the exact address or APN before saving the owner.</p></div>
             <div className="scout-evidence-links"><a href={ownershipSearchUrl} target="_blank" rel="noreferrer">Open exact ownership search ↗</a><a href={countySearchUrl} target="_blank" rel="noreferrer">Open county record search ↗</a></div>
             <label>Visible ownership text<textarea value={evidenceText} onChange={(event) => setEvidenceText(event.target.value)} placeholder="Example: Ownership History. Current Owners Feb 2025 - Present…" rows={4} /></label>
             <label className="scout-evidence-file">Ownership screenshot<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => chooseEvidenceImage(event.target.files?.[0])} /><span>{evidenceFileName || "Choose screenshot"}</span></label>
-            <button type="button" className="scout-evidence-submit" onClick={verifyEvidence} disabled={evidenceBusy || (!evidenceText.trim() && !evidenceImage)}>{evidenceBusy ? "Verifying…" : "Verify and save owner"}</button>
+            <button type="button" className="scout-evidence-submit" onClick={verifyEvidence} disabled={processing || (!evidenceText.trim() && !evidenceImage)}>{evidenceBusy ? "Verifying…" : "Verify and save owner"}</button>
             <small>Evidence verifications: {ownerEvidenceUsage.requests} of {ownerEvidenceUsage.limit} this month. Screenshots are analyzed but not stored; only the verified result and source link are saved.</small>
           </section>
           <section><h3>Parcel identity</h3><DetailGrid values={[["Address", identity.address], ["APN", identity.apn], ["County", identity.county], ["State", identity.state]]} /></section>
@@ -206,7 +247,7 @@ export default function ParcelScoutPage() {
         <section className="scout-sources"><h3>Sources checked</h3>{result.sources?.length ? result.sources.map((source, index) => <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}><span><strong>{source.title || "Public source"}</strong>{source.supports?.length ? <small>{source.supports.join(" · ")}</small> : null}</span><b>↗</b></a>) : <p>No direct source links were returned. Treat the report as unverified.</p>}</section>
       </article>}
 
-      <section className="scout-history"><div><p className="kicker">Saved locally in Pauli HQ</p><h2>Recent lookups</h2></div>{researches.length ? <div className="scout-history-list">{researches.map((research) => <article key={research.id}><button className="scout-history-open" onClick={() => openResearch(research)}><span>{Boolean(research.starred) ? "★" : "☆"}</span><div><strong>{String(research.result.identity?.address || research.query_text)}</strong><small>{research.query_type === "apn" ? `APN ${research.query_text} · ${research.county}, ${research.state}` : "Address lookup"}</small></div></button><button className="scout-delete" onClick={() => remove(research)} aria-label={`Remove lookup for ${research.query_text}`}>Remove</button></article>)}</div> : <p className="scout-history-empty">No property investigations yet.</p>}</section>
+      <section className="scout-history"><div><p className="kicker">Saved in Pauli HQ</p><h2>Recent lookups</h2></div>{researches.length ? <div className="scout-history-list">{researches.map((research) => <article key={research.id}><button className="scout-history-open" onClick={() => openResearch(research)} disabled={processing}><span>{Boolean(research.starred) ? "★" : "☆"}</span><div><strong>{String(research.address || research.query_text)}</strong><small>{opening === research.id ? "Opening…" : research.query_type === "apn" ? `APN ${research.query_text} · ${research.county}, ${research.state}` : "Address lookup"}</small></div></button><button className="scout-delete" onClick={() => remove(research)} disabled={processing} aria-label={`Remove lookup for ${research.query_text}`}>Remove</button></article>)}</div> : <p className="scout-history-empty">No property investigations yet.</p>}</section>
     </section>
   </main>;
 }

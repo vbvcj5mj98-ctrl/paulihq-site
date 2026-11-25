@@ -17,7 +17,7 @@ export default function AssistantBubble() {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (["/", "/login", "/setup", "/assistant"].includes(pathname)) return setAvailable(false);
+    if (["/", "/login", "/setup", "/assistant", "/photo-drop"].includes(pathname)) return setAvailable(false);
     fetch("/api/me").then(async (response) => {
       if (!response.ok) return setAvailable(false);
       const result = await response.json() as { permissions?: Record<string, boolean> };
@@ -44,7 +44,11 @@ export default function AssistantBubble() {
     }).catch((reason: Error) => setError(reason.message));
   }, [loaded, open]);
 
-  useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [messages, busy, open]);
+  useEffect(() => {
+    if (!open) return;
+    const pane = endRef.current?.parentElement;
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  }, [messages, busy, open]);
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -62,7 +66,7 @@ export default function AssistantBubble() {
     } finally { setBusy(false); }
   }
 
-  if (!available) return null;
+  if (!available || pathname === "/photo-drop") return null;
   return <aside className={`assistant-bubble${open ? " open" : ""}`}>
     {open && <section className="assistant-popover" role="dialog" aria-label="Pauli HQ Assistant">
       <header><div><small>PAULI HQ</small><strong>Assistant</strong></div><button onClick={() => setOpen(false)} aria-label="Close assistant">×</button></header>

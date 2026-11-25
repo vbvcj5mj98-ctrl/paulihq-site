@@ -2,22 +2,27 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 export default function HqMenu({ current }: { current: string }) {
+  const router = useRouter();
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [username, setUsername] = useState("");
   useEffect(() => { fetch("/api/me").then((response) => response.json()).then((result: { username?: string; permissions?: Record<string, boolean> }) => { setPermissions(result.permissions ?? {}); setUsername(result.username ?? ""); }).catch(() => undefined); }, []);
-  const menuValue = current === "/profile" || current === "/assistant" ? "/portal" : current;
+  const menuValue = current === "/profile" ? "" : current;
   return (
     <div className="hq-user-menu">
       <label className="hq-menu">
         <span className="sr-only">Jump to</span>
-        <select aria-label="Jump to another Pauli HQ tool" value={menuValue} onChange={(event) => window.location.assign(event.target.value)}>
+        <select aria-label="Jump to another Pauli HQ tool" value={menuValue} onChange={(event) => { if (event.target.value) router.push(event.target.value); }}>
+          {menuValue === "" && <option value="" disabled>Jump to</option>}
           <option value="/portal">Home</option>
+          {(permissions.assistant || current === "/assistant") && <option value="/assistant">Assistant</option>}
           {permissions.lists && <option value="/lists">Lists</option>}
           {permissions.properties && <option value="/properties">Property Finder</option>}
           {permissions.properties && <option value="/parcel-scout">Parcel Scout</option>}
           <option value="/portfolio">Property Portfolio</option>
+          {(permissions.photo_drop || current === "/photo-drop") && <option value="/photo-drop">Photo Drop</option>}
           {(permissions.user_management || current === "/admin/users") && <option value="/admin/users">User Management</option>}
         </select>
       </label>
